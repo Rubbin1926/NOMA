@@ -2,7 +2,6 @@ import dgl
 import torch
 from torch import nn
 from torch.nn import functional as F
-from dgl.nn import TAGConv
 import dgl.nn.pytorch as dglnn
 
 
