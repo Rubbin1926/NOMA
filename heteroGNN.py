@@ -94,4 +94,6 @@ dd = heteroGNN(torch.tensor([[0,1,0,0,0,0],
 print(dd.mask(dd.Graph))
 print(dd.forward([1,2,3,4],[5,4,3,2],10,15,20))
 
+print(None)
+
 
