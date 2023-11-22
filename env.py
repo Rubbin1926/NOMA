@@ -69,6 +69,12 @@ class NOMAenv(gym.Env):
         return torch.max(totalTime_fake @ (Graph[:, self.numberOfJobs: Graph.size()[1]]))
 
 
+    def calculate_time_dummy(self, Graph):
+        row = torch.sum(Graph, dim=1)
+        totalTime_dummy = torch.sum((1 - row) * self.T_list)
+        return torch.max(totalTime_dummy, self.calculate_time_nodummy(Graph))
+
+
     def mask(self, Graph):
         #mask test case
         # Graph = torch.tensor([[0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0], [0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 0, 0]]).float()
@@ -130,7 +136,7 @@ class NOMAenv(gym.Env):
 
 
     def reward(self, Graph):
-        return -self.calculate_time_nodummy(Graph)
+        return -self.calculate_time_dummy(Graph)
 
 
     def is_done(self):
@@ -145,14 +151,17 @@ class NOMAenv(gym.Env):
 
 
 
-
-
+# tmp test
 # aaa = NOMAenv()
 # aaa.reset()
-# t = aaa.calculate_time_nodummy(Graph=torch.tensor([[0, 1, 0, 0, 0, 0],
+# t_d = aaa.calculate_time_dummy(Graph=torch.tensor([[0, 1, 0, 0, 0, 0],
 #                                                    [0, 0, 0, 0, 1, 0],
 #                                                    [0, 0, 0, 0, 0, 1],
 #                                                    [0, 0, 0, 0, 0, 1]]).float())
+# t_nd = aaa.calculate_time_nodummy(Graph=torch.tensor([[0, 1, 0, 0, 0, 0],
+#                                                       [0, 0, 0, 0, 1, 0],
+#                                                       [0, 0, 0, 0, 0, 1],
+#                                                       [0, 0, 0, 0, 0, 1]]).float())
 # ma = aaa.mask(Graph=torch.tensor([[0, 0, 0, 0, 0, 0],
 #                                   [0, 0, 0, 0, 0, 0],
 #                                   [0, 0, 0, 1, 0, 0],
@@ -165,7 +174,8 @@ class NOMAenv(gym.Env):
 #                                          [0, 0, 0, 0, 0, 0],
 #                                          [0, 0, 0, 0, 0, 0],
 #                                          [0, 0, 0, 0, 0, 0]]).float())
-# print(f"""time = {t}""")
+# print(f"""time_dummy = {t_d}""")
+# print(f"""time_nodummy = {t_nd}""")
 # print(f"""mask = {ma}""")
 # print(f"""reward = {re}""")
 # print(f"""action = {action}""")
