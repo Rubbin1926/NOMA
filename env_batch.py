@@ -60,6 +60,12 @@ class NOMAenv(gym.Env):
         return torch.squeeze(max_values, dim=1)
 
 
+    def calculate_time_dummy(self, Graph):
+        row = torch.transpose(torch.sum(Graph, dim=2, keepdim=True), 1, 2)
+        totalTime_dummy = torch.sum(row * self.T_list, dim=2).view(-1)
+        return torch.max(totalTime_dummy, self.calculate_time_nodummy(Graph))
+
+
     def mask(self, Graph):
         left = torch.ones((self.batch_size, self.numberOfJobs, self.numberOfJobs))
         right = torch.ones((self.batch_size, self.numberOfJobs, self.numberOfMachines))
@@ -121,7 +127,7 @@ class NOMAenv(gym.Env):
 
 
     def reward(self, Graph):
-        return -self.calculate_time_nodummy(Graph)
+        return -self.calculate_time_dummy(Graph)
 
 
     def is_done(self):
