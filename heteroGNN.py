@@ -19,35 +19,42 @@ def tensor_to_dgl(Graph: torch.tensor):
     job_to_machine_link_src, job_to_machine_link_dst = tensor_to_link(job_to_machine)[0], tensor_to_link(job_to_machine)[1]
 
     g = dgl.heterograph({('job', 'to_job', 'job'): ([], []),
-                         ('job', 'to_machine', 'machine'): ([], [])})
+                         ('job', 'to_machine', 'machine'): ([], []),
+                         ('machine', 'to_terminal', 'terminal'): ([], [])})
+    g.add_nodes(numberOfJobs, ntype='job')
+    g.add_nodes(numberOfMachines, ntype='machine')
+    g.add_nodes(1, ntype='terminal')
 
     g.add_edges(job_to_job_link_src, job_to_job_link_dst, etype=('job', 'to_job', 'job'))
     g.add_edges(job_to_machine_link_src, job_to_machine_link_dst, etype=('job', 'to_machine', 'machine'))
+    g.add_edges(torch.arange(0, numberOfMachines), torch.zeros(numberOfMachines).to(torch.int64), 
+                etype=('machine', 'to_terminal', 'terminal'))
+    print(g)
 
     return g
 
 
 class heteroGNN(nn.Module):
-    def __init__(self, Graph: torch.tensor, job_output_features_number: int, machine_output_features_number: int):
+    def __init__(self, numberOfJobs: int, numberOfMachines: int, 
+                 job_output_features_number: int, machine_output_features_number: int):
         super(heteroGNN, self).__init__()
-        self.Graph = Graph
-        numberOfJobs, numberOfMachines = Graph.shape[0], Graph.shape[1] - Graph.shape[0]
         self.job_output_features_number, self.machine_output_features_number = job_output_features_number, machine_output_features_number
 
         self.conv = dglnn.HeteroGraphConv({
                     'to_job': dglnn.GraphConv(5, job_output_features_number),
                     'to_machine': dglnn.GraphConv(5, machine_output_features_number)},
-                    aggregate='mean')
+                    aggregate='max')
 
         """
         Linear code here
         """
-        self.linear_for_job = nn.Linear(job_output_features_number, Graph.shape[1])
+        self.linear_for_job = nn.Linear(job_output_features_number, numberOfJobs + numberOfMachines)
         self.linear_for_machine = nn.Linear(numberOfMachines * machine_output_features_number,
-                                            numberOfJobs * Graph.shape[1])
+                                            numberOfJobs * (numberOfJobs + numberOfMachines))
 
 
-    def forward(self, h: list, L: list, W, P, N):
+    def forward(self, Graph, h: list, L: list, W, P, N):
+        self.Graph = Graph
         numberOfJobs, numberOfMachines = len(h), self.Graph.shape[1] - len(h)
         jobs = list(zip(h, L))
         jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True))
@@ -86,13 +93,18 @@ class heteroGNN(nn.Module):
         return torch.cat((left, right), dim=1)
 
 
-dd = heteroGNN(torch.tensor([[0,1,0,0,0,0],
-                             [0,0,0,0,1,0],
-                             [0,0,0,0,0,1],
-                             [0,0,0,0,0,1]]), 3, 3)
+dd = heteroGNN(4,2,3,3)
 
+
+print(dd.forward(torch.tensor([[0,1,0,0,0,0],
+                               [0,0,0,0,1,0],
+                               [0,0,0,0,0,1],
+                               [0,0,0,0,0,0]]),[1,2,3,4],[5,4,3,2],10,15,20))
+print(dd.forward(torch.tensor([[0,1,0,0,0,0],
+                               [0,0,0,0,1,0],
+                               [0,0,0,0,0,1],
+                               [0,0,0,0,0,1]]),[1,2,3,4],[5,4,3,2],10,15,20))
 print(dd.mask(dd.Graph))
-print(dd.forward([1,2,3,4],[5,4,3,2],10,15,20))
 
 
 
