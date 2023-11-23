@@ -7,7 +7,7 @@ g = dgl.heterograph({
 print(g)
 
 
-# case1:起始节点交接问题
+# case1:
 # F.linear(input, self.weight, self.bias)
 # RuntimeError: mat1 and mat2 shapes cannot be multiplied (4x3 and 1x2)
 """
