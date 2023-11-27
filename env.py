@@ -29,14 +29,29 @@ def sample_env():
     # numberOfJobs = random.randint(8, 90)
     # numberOfMachines = random.randint(2, 12)
 
-    numberOfJobs = 4
-    numberOfMachines = 2
+    numberOfJobs = 12
+    numberOfMachines = 4
 
-    h = np.abs(np.random.normal(10, 1, numberOfJobs)).tolist()
-    L = np.abs(np.random.normal(100, 10, numberOfJobs)).tolist()
-    W = random.randint(1, 5)
-    P = random.randint(1, 5)
-    n = random.randint(1, 5)
+    """Just Int For Test"""
+    # h = np.abs(np.random.normal(10, 1, numberOfJobs)).tolist()
+    # L = np.abs(np.random.normal(100, 10, numberOfJobs)).tolist()
+    # W = random.randint(1, 5)
+    # P = random.randint(1, 5)
+    # n = random.randint(1, 5)
+
+    """Parameters in paper"""
+    def h_distribution():
+        d = random.randrange(1, 500)
+        tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
+        tmp1 = 10 ** tmp0
+        _h = 1 / tmp1
+        return _h
+
+    h = [h_distribution() for _ in range(numberOfJobs)]
+    L = np.random.randint(1, 1024, size=(numberOfJobs, )).tolist()
+    W = 180 / numberOfMachines * 1000
+    P = 0.1
+    n = (10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)
     return (h, L, numberOfJobs, numberOfMachines, W, P, n)
 
 class NOMAenv(gym.Env):
