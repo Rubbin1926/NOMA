@@ -30,8 +30,8 @@ def tensor_to_dgl(Graph: torch.tensor):
     g.add_edges(job_to_machine_link_src, job_to_machine_link_dst, etype=('job', 'to_machine', 'machine'))
     g.add_edges(torch.arange(0, numberOfMachines), torch.zeros(numberOfMachines).to(torch.int64),
                 etype=('machine', 'to_terminal', 'terminal'))
-    print(g)
 
+    # print(g)
     return g
 
 
@@ -40,10 +40,11 @@ class heteroGNN(nn.Module):
                  job_output_features_number: int, machine_output_features_number: int):
         super(heteroGNN, self).__init__()
 
+        self.machine_output_features_number = machine_output_features_number
         self.conv = dglnn.HeteroGraphConv({
                     'to_job': dglnn.GraphConv(5, job_output_features_number),
                     'to_machine': dglnn.GraphConv(5, machine_output_features_number),
-                    'to_terminal': dglnn.SAGEConv(5, 1, aggregator_type='pool')},
+                    'to_terminal': dglnn.GraphConv(machine_output_features_number, 1)},
                     aggregate='max')
 
         """
@@ -65,8 +66,8 @@ class heteroGNN(nn.Module):
         heteroGraph = tensor_to_dgl(self.Graph)
 
         features = {'job': jobFeatures,
-                    'machine': torch.ones(2, 5),
-                    'terminal': torch.ones(1, 5)}
+                    'machine': torch.ones(numberOfMachines, self.machine_output_features_number),
+                    'terminal': torch.ones(self.machine_output_features_number, 1000)}
 
         Graph_conv_re = self.conv(heteroGraph, features)
         job_conv, machine_conv = Graph_conv_re['job'], Graph_conv_re['machine'].flatten()
