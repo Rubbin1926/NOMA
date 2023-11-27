@@ -5,6 +5,7 @@ from typing import Optional
 import random
 import numpy as np
 import sys
+import math
 
 
 def build_time_matrix(jobList, numberOfJobs, W, P, n):
@@ -26,18 +27,32 @@ def build_time_matrix(jobList, numberOfJobs, W, P, n):
 
 
 def sample_env(batch_size):
-    # numberOfJobs = random.randint(8, 90)
-    # numberOfMachines = random.randint(2, 12)
+    numberOfJobs = 18
+    numberOfMachines = 4
 
-    numberOfJobs = 90
-    numberOfMachines = 12
+    """Just Int For Test"""
+    # h = np.abs(np.random.normal(10, 1, (batch_size, numberOfJobs))).tolist()
+    # L = np.abs(np.random.normal(100, 10, (batch_size, numberOfJobs))).tolist()
+    # W = np.random.randint(1, 5, size=(batch_size,)).tolist()
+    # P = np.random.randint(1, 5, size=(batch_size,)).tolist()
+    # n = np.random.randint(1, 5, size=(batch_size,)).tolist()
 
-    h = np.abs(np.random.normal(10, 1, (batch_size, numberOfJobs))).tolist()
-    L = np.abs(np.random.normal(100, 10, (batch_size, numberOfJobs))).tolist()
-    W = np.random.randint(1, 5, size=(batch_size,)).tolist()
-    P = np.random.randint(1, 5, size=(batch_size,)).tolist()
-    n = np.random.randint(1, 5, size=(batch_size,)).tolist()
+    """Parameters in paper"""
+    def h_distribution():
+        d = random.randrange(1, 500)
+        tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
+        tmp1 = 10 ** tmp0
+        _h = 1 / tmp1
+        return _h
+
+    h = [[h_distribution() for _ in range(numberOfJobs)] for _ in range(batch_size)]
+    L = np.random.randint(1, 1024, size=(batch_size, numberOfJobs)).tolist()
+    W = [180 / numberOfMachines * 1000] * batch_size
+    P = [0.1] * batch_size
+    n = [(10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)] * batch_size
+
     return (h, L, numberOfJobs, numberOfMachines, W, P, n)
+
 
 class NOMAenv(gym.Env):
     #jobs:[[h,L],[],...,[]]
@@ -62,7 +77,7 @@ class NOMAenv(gym.Env):
 
     def calculate_time_dummy(self, Graph):
         row = torch.transpose(torch.sum(Graph, dim=2, keepdim=True), 1, 2)
-        totalTime_dummy = torch.sum(row * self.T_list, dim=2).view(-1)
+        totalTime_dummy = torch.sum((1 - row) * self.T_list, dim=2).view(-1)
         return torch.max(totalTime_dummy, self.calculate_time_nodummy(Graph))
 
 
