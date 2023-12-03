@@ -66,15 +66,15 @@ class heteroGNN(nn.Module):
         heteroGraph = tensor_to_dgl(self.Graph)
 
         features = {'job': jobFeatures,
-                    'machine': torch.ones(numberOfMachines, self.machine_output_features_number),
-                    'terminal': torch.ones(self.machine_output_features_number, 1000)}
+                    'machine': torch.ones(numberOfMachines, self.machine_output_features_number),  # 这行会影响terminal的结果
+                    'terminal': torch.ones(self.machine_output_features_number, 1000)}  # 这行不会影响terminal的结果
 
         Graph_conv_re = self.conv(heteroGraph, features)
         job_conv, machine_conv = Graph_conv_re['job'], Graph_conv_re['machine'].flatten()
         terminal_conv = Graph_conv_re['terminal']
 
         Value = self.linear_for_job(job_conv) + self.linear_for_machine(machine_conv).view(numberOfJobs, -1)
-        Possibility_tmp = Value - (1 - self.mask(self.Graph)) * 1e5
+        Possibility_tmp = Value - (1 - self.mask(self.Graph)) * 1e4
         Possibility = F.softmax(Possibility_tmp.view(-1), dim=0)
         Possibility = Possibility.view(Possibility_tmp.size())
 
@@ -95,20 +95,20 @@ class heteroGNN(nn.Module):
         return torch.cat((left, right), dim=1)
 
 
-dd = heteroGNN(4, 2, 20, 20)
+# test code below
 
-
-print(dd.forward(torch.tensor([[0,1,0,0,0,0],
-                               [0,0,0,0,1,0],
-                               [0,0,0,0,0,1],
-                               [0,0,0,0,0,0]]),[1,2,3,4],[5,4,3,2],10,15,20))
-print(dd.mask(dd.Graph))
-print("________________________")
-print(dd.forward(torch.tensor([[0,1,0,0,0,0],
-                               [0,0,0,0,1,0],
-                               [0,0,0,0,0,1],
-                               [0,0,0,0,0,1]]),[1,2,3,4],[5,4,3,2],10,15,20))
-print(dd.mask(dd.Graph))
+# dd = heteroGNN(4, 2, 20, 20)
+# print(dd.forward(torch.tensor([[0,1,0,0,0,0],
+#                                [0,0,0,0,1,0],
+#                                [0,0,0,0,0,1],
+#                                [0,0,0,0,0,0]]),[1,2,3,4],[5,4,3,2],10,15,20))
+# print(dd.mask(dd.Graph))
+# print("________________________")
+# print(dd.forward(torch.tensor([[0,1,0,0,0,0],
+#                                [0,0,0,0,1,0],
+#                                [0,0,0,0,0,1],
+#                                [0,0,0,0,0,1]]),[1,2,3,4],[5,4,3,2],10,15,20))
+# print(dd.mask(dd.Graph))
 
 
 

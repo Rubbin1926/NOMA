@@ -1,36 +1,55 @@
-def calculate_time_nodummy(Graph):
-    G_tmp = Graph[:, :, 0:self.numberOfJobs]
-    row = torch.transpose(torch.sum(G_tmp, dim=2, keepdim=True), 1, 2)
-    col = torch.sum(G_tmp, dim=1, keepdim=True)
-
-    totalTime_OMA_fake = (1 - row - col) * self.T_list
-    totalTime_NOMA_fake = torch.sum(G_tmp * self.T, dim=1, keepdim=True)
-    totalTime_fake = totalTime_OMA_fake + totalTime_NOMA_fake
-
-    Time_b_1_n = torch.bmm(totalTime_fake, (Graph[:, :, self.numberOfJobs: Graph.size()[2]]))
-    max_values, _ = torch.max(Time_b_1_n, dim=2)
-
-    return torch.squeeze(max_values, dim=1)
+from env import NOMAenv
+from heteroGNN import heteroGNN
+import torch
 
 
-def mask(Graph: torch.tensor):
-    left = torch.ones((Graph.size()[0], Graph.size()[0]))
-    right = torch.ones((Graph.size()[0], Graph.size()[1] - Graph.size()[0]))
-    row = torch.sum(Graph, dim=1, keepdim=True)
-    col = torch.sum(Graph, dim=0, keepdim=True)
+env = NOMAenv()
+observation, info = env.reset(seed=42)
+numberOfJobs = observation.shape[0]
+numberOfMachines = observation.shape[1] - numberOfJobs
 
-    left = left - row - torch.t(row) - col[:, 0:Graph.size()[0]] - torch.t(col[:, 0:Graph.size()[0]])
-    left = torch.where(left == 1, torch.tensor(1).float(), torch.tensor(0).float())
-    left = left.triu(diagonal=1)
-    right -= row
+gnn = heteroGNN(numberOfJobs, numberOfMachines,
+                job_output_features_number=3, machine_output_features_number=5)
 
-    return torch.cat((left, right), dim=1)
 
-def optimal_solution_and_value(Graph)
-    mask = mask(Graph)
+def optimal_solution_and_value(Graph):
+    mask = env.mask(Graph)
     if torch.sum(mask) == 0:
-        return calculate_time_nodummy(Graph), Graph
+        return env.calculate_time_nodummy(Graph), Graph
 
-    for mask in all_mask:
-        newGraph  = Graph + mask
-        optimal_time, optimal_Graph = optimal_solution_and_value(newGraph)
+
+    def generate_mask_list(mask):
+        mask_indices = torch.nonzero(mask)  # 获取mask中为1的元素的索引位置
+        tensors = []
+
+        for index in mask_indices:
+            tensor = torch.zeros_like(mask)  # 创建和mask大小相同的全0矩阵
+            tensor[index[0], index[1]] = 1  # 将对应位置的元素设置为1
+            tensors.append(tensor)
+
+        return tensors
+
+    mask_list = generate_mask_list(mask)
+
+    # newGraph = Graph + mask_list[0]
+    # return optimal_solution_and_value(newGraph)
+
+    for action in mask_list:
+        newGraph = Graph + action
+        terminal_conv, Value, Possibility = gnn.forward(Graph, env.h, env.L, env.W, env.P, env.n)
+        print(terminal_conv, Value, Possibility)
+        print("____________")
+        return optimal_solution_and_value(newGraph)
+
+
+
+
+
+
+    # for mask in all_mask:
+    #     newGraph  = Graph + mask
+    #     optimal_time, optimal_Graph = optimal_solution_and_value(newGraph)
+
+print(optimal_solution_and_value(observation))
+
+

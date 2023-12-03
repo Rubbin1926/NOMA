@@ -90,16 +90,13 @@ class NOMAenv(gym.Env):
         return torch.max(totalTime_dummy, self.calculate_time_nodummy(Graph))
 
 
-    def mask(self, Graph):
-        #mask test case
-        # Graph = torch.tensor([[0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0], [0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 0, 0]]).float()
-
-        left = torch.ones((self.numberOfJobs, self.numberOfJobs))
-        right = torch.ones((self.numberOfJobs, self.numberOfMachines))
+    def mask(self, Graph: torch.tensor):
+        left = torch.ones((Graph.size()[0], Graph.size()[0]))
+        right = torch.ones((Graph.size()[0], Graph.size()[1]-Graph.size()[0]))
         row = torch.sum(Graph, dim=1, keepdim=True)
         col = torch.sum(Graph, dim=0, keepdim=True)
 
-        left = left - row - torch.t(row) - col[:, 0:self.numberOfJobs] - torch.t(col[:, 0:self.numberOfJobs])
+        left = left - row - torch.t(row) - col[:, 0:Graph.size()[0]] - torch.t(col[:, 0:Graph.size()[0]])
         left = torch.where(left == 1, torch.tensor(1).float(), torch.tensor(0).float())
         left = left.triu(diagonal=1)
         right -= row
@@ -122,14 +119,13 @@ class NOMAenv(gym.Env):
         options: Optional[dict] = None,
     ):
         super().reset(seed=seed)
-        h, L, self.numberOfJobs, self.numberOfMachines, W, P, n = sample_env()
-
-        jobs = list(zip(h, L))
+        self.h, self.L, self.numberOfJobs, self.numberOfMachines, self.W, self.P, self.n = sample_env()
+        jobs = list(zip(self.h, self.L))
         self.jobList = sorted(jobs, key=lambda x: x[0], reverse=True)
 
         self.G = torch.zeros((self.numberOfJobs, self.numberOfJobs + self.numberOfMachines))
-        self.T = build_time_matrix(self.jobList, self.numberOfJobs, W, P, n)[0]
-        self.T_list = build_time_matrix(self.jobList, self.numberOfJobs, W, P, n)[1]
+        self.T = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[0]
+        self.T_list = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[1]
 
         #test case
         # self.G = torch.tensor([[0, 1, 0, 0, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 1]]).float()
