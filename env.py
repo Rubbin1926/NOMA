@@ -29,8 +29,8 @@ def sample_env():
     # numberOfJobs = random.randint(8, 90)
     # numberOfMachines = random.randint(2, 12)
 
-    numberOfJobs = 12
-    numberOfMachines = 4
+    numberOfJobs = 4
+    numberOfMachines = 2
 
     """Just Int For Test"""
     # h = np.abs(np.random.normal(10, 1, numberOfJobs)).tolist()
