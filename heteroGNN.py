@@ -31,7 +31,6 @@ def tensor_to_dgl(Graph: torch.tensor):
     g.add_edges(torch.arange(0, numberOfMachines), torch.zeros(numberOfMachines).to(torch.int64),
                 etype=('machine', 'to_terminal', 'terminal'))
 
-    # print(g)
     return g
 
 
