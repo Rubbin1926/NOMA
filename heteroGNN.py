@@ -52,6 +52,7 @@ class heteroGNN(nn.Module):
         self.linear_for_job = nn.Linear(job_output_features_number, numberOfJobs + numberOfMachines)
         self.linear_for_machine = nn.Linear(numberOfMachines * machine_output_features_number,
                                             numberOfJobs * (numberOfJobs + numberOfMachines))
+        self.linear_for_terminal = nn.Linear(numberOfJobs * (numberOfJobs + numberOfMachines), 1)
 
 
     def forward(self, Graph, h: list, L: list, W, P, N):
@@ -70,12 +71,17 @@ class heteroGNN(nn.Module):
 
         Graph_conv_re = self.conv(heteroGraph, features)
         job_conv, machine_conv = Graph_conv_re['job'], Graph_conv_re['machine'].flatten()
+
+        # 图神经网络卷积的结果
         terminal_conv = Graph_conv_re['terminal']
 
         Value = self.linear_for_job(job_conv) + self.linear_for_machine(machine_conv).view(numberOfJobs, -1)
         Possibility_tmp = Value - (1 - self.mask(self.Graph)) * 1e4
         Possibility = F.softmax(Possibility_tmp.view(-1), dim=0)
         Possibility = Possibility.view(Possibility_tmp.size())
+
+        # 使用Value，计算terminal
+        # terminal_conv = F.sigmoid(self.linear_for_terminal(F.sigmoid(Value).flatten()))
 
         return terminal_conv, Value, Possibility
 
