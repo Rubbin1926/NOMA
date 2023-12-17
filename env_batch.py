@@ -39,7 +39,7 @@ def sample_env(batch_size):
 
     """Parameters in paper"""
     def h_distribution():
-        d = random.randrange(1, 500)
+        d = random.uniform(0.1, 0.5)
         tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
         tmp1 = 10 ** tmp0
         _h = 1 / tmp1
