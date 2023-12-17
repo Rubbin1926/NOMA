@@ -9,12 +9,14 @@ import time
 start_time = time.time()
 
 
-env = NOMAenv()
-observation, info = env.reset(seed=42)
+env_train = NOMAenv()
+env_test = NOMAenv()
+observation, info = env_train.reset(seed=42)
 numberOfJobs = observation.shape[0]
 numberOfMachines = observation.shape[1] - numberOfJobs
 
-DataSet = {}
+trainDataSet = {}
+testDataSet = {}
 
 
 def generate_mask_list(mask):
@@ -29,7 +31,7 @@ def generate_mask_list(mask):
     return tensors
 
 
-def find(Graph, Dataset):
+def find(Graph, Dataset, env):
     mask = env.mask(Graph)
 
     if torch.sum(mask) == 0:
@@ -45,7 +47,7 @@ def find(Graph, Dataset):
     mask_list = generate_mask_list(mask)
 
     for action in mask_list:
-        G_, V_ = find(Graph+action, Dataset)
+        G_, V_ = find(Graph+action, Dataset, env)
         if V_ > V_star:
             V_star = V_
             A_star = action
@@ -56,22 +58,26 @@ def find(Graph, Dataset):
 
 # 3, 16, 136, 1677, 27751, 586018, 15226086
 
-find(observation, DataSet)
-print(DataSet)
-print(f"""len = {len(DataSet)}""")
+find(observation, trainDataSet, env_train)
+print(trainDataSet)
+print(f"""len = {len(trainDataSet)}""")
 
 end_time = time.time()
 elapsed_time = end_time - start_time
 print(f"程序执行时间：{elapsed_time}秒")
 
-with open('dataset_4_2.pkl', 'wb') as file:
-    pickle.dump(DataSet, file)
+# 生成test数据集
+observation, info = env_test.reset(seed=42)
+find(observation, testDataSet, env_test)
 
 
-
-# 从文件中加载字典
-with open('dataset_4_2.pkl', 'rb') as file:
-    GNN_dataset = pickle.load(file)
+# with open('trainDataset.pkl', 'wb') as file:
+#     pickle.dump(trainDataSet, file)
+#
+#
+# # 从文件中加载字典
+# with open('trainDataset.pkl', 'rb') as file:
+#     trainDataSet = pickle.load(file)
 
 
 class Read_Dataset(Dataset):
@@ -87,26 +93,45 @@ class Read_Dataset(Dataset):
         y = self.values[idx][2]  # 取Value作为y
         return x, y
 
+def validate(model: heteroGNN, dataset: Read_Dataset, env: NOMAenv):
+    cor, num = 0, dataset.__len__()
+    for X, y in dataset:
+        pred = model.forward(X.type(torch.float32), env.h, env.L, env.W, env.P, env.n)[0]
+        if torch.abs(pred - y) / y < 0.05:
+            cor += 1
+    acc = cor / num
+    return acc
+
 
 # 获取关键两个参数
 # first_key = next(iter(GNN_dataset))
 # numberOfJobs = first_key.shape[0]
 # numberOfMachines = first_key.shape[1] - numberOfJobs
 
-Train_dataset = Read_Dataset(GNN_dataset)
-dataloader = DataLoader(Train_dataset, batch_size=8, shuffle=False)
+
+Train_dataset = Read_Dataset(trainDataSet)
+Test_dataset = Read_Dataset(testDataSet)
+dataloader = DataLoader(Train_dataset, batch_size=64, shuffle=False)
 
 gnn = heteroGNN(numberOfJobs, numberOfMachines,
-                job_output_features_number=3, machine_output_features_number=5)
-optimizer = torch.optim.Adam(gnn.parameters(), lr=0.1)
+                job_output_features_number=10, machine_output_features_number=10)
+optimizer = torch.optim.Adam(gnn.parameters(), lr=0.0001, weight_decay=1e-5)
 loss_f = nn.MSELoss()
 
 for i in range(100):
+    gnn.train()
     for X, y in Train_dataset:
-        pre_y = gnn.forward(X.type(torch.float32), env.h, env.L, env.W, env.P, env.n)[0]
+        pre_y = gnn.forward(X.type(torch.float32), env_train.h, env_train.L, env_train.W, env_train.P, env_train.n)[0]
         loss = loss_f(pre_y, y.type(torch.float32))
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
     print(f"""i = {i} loss = {loss}""")
+
+    if i % 3 == 0:
+        gnn.eval()
+        acc_train = validate(gnn, Train_dataset, env_train)
+        acc_test = validate(gnn, Test_dataset, env_test)
+        print(f"After {i}, acc_train = {acc_train}")
+        print(f"After {i}, acc_tset = {acc_test}")
