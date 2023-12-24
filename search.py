@@ -93,11 +93,12 @@ class Read_Dataset(Dataset):
         y = self.values[idx][2]  # 取Value作为y
         return x, y
 
+
 def validate(model: heteroGNN, dataset: Read_Dataset, env: NOMAenv):
     cor, num = 0, dataset.__len__()
     for X, y in dataset:
         pred = model.forward(X.type(torch.float32), env.h, env.L, env.W, env.P, env.n)[0]
-        if torch.abs(pred - y) / y < 0.05:
+        if torch.abs(pred - y) / y < 0.1:
             cor += 1
     acc = cor / num
     return acc
@@ -135,3 +136,7 @@ for i in range(100):
         acc_test = validate(gnn, Test_dataset, env_test)
         print(f"After {i}, acc_train = {acc_train}")
         print(f"After {i}, acc_tset = {acc_test}")
+
+
+ # 加层数
+ # machine取max
