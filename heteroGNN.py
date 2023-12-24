@@ -52,7 +52,9 @@ class heteroGNN(nn.Module):
         self.linear_for_job = nn.Linear(job_output_features_number, numberOfJobs + numberOfMachines)
         self.linear_for_machine = nn.Linear(numberOfMachines * machine_output_features_number,
                                             numberOfJobs * (numberOfJobs + numberOfMachines))
-        self.linear_for_terminal = nn.Linear(numberOfJobs * (numberOfJobs + numberOfMachines), 1)
+        self.linear_for_terminal_0 = nn.Linear(numberOfJobs + numberOfMachines, 64)
+        self.linear_for_terminal_1 = nn.Linear(64, 128)
+        self.linear_for_terminal_2 = nn.Linear(128, 1)
 
 
     def forward(self, Graph, h: list, L: list, W, P, N):
@@ -81,7 +83,11 @@ class heteroGNN(nn.Module):
         Possibility = Possibility.view(Possibility_tmp.size())
 
         # 使用Value，计算terminal
-        # terminal_conv = F.sigmoid(self.linear_for_terminal(F.sigmoid(Value).flatten()))
+        terminal_conv_0 = F.leaky_relu(self.linear_for_terminal_0(F.leaky_relu(Value)))
+        terminal_conv_1 = F.leaky_relu(self.linear_for_terminal_1(terminal_conv_0))
+        terminal_conv_2 = F.leaky_relu(self.linear_for_terminal_2(terminal_conv_1))
+        terminal_conv_3 = torch.max(terminal_conv_2)
+        terminal_conv = torch.max(terminal_conv, terminal_conv_3)
 
         return terminal_conv, Value, Possibility
 
@@ -98,6 +104,8 @@ class heteroGNN(nn.Module):
         right -= row
 
         return torch.cat((left, right), dim=1)
+
+
 
 
 # test code below
