@@ -29,7 +29,7 @@ def sample_env():
     # numberOfJobs = random.randint(8, 90)
     # numberOfMachines = random.randint(2, 12)
 
-    numberOfJobs = 4
+    numberOfJobs = 3
     numberOfMachines = 2
 
     """Just Int For Test"""
@@ -144,6 +144,9 @@ class NOMAenv(gym.Env):
 
         return sampleMatrix
 
+
+    def get_parameters(self):
+        return (self.h, self.L, self.W, self.P, self.n)
 
 
     def reward(self, Graph):
