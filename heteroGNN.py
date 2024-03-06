@@ -15,8 +15,8 @@ def tensor_to_dgl(Graph: torch.tensor):
         re = nonzero_indices_2d.view(2, -1)
         return re
 
-    job_to_job_link_src, job_to_job_link_dst = tensor_to_link(job_to_job)[0], tensor_to_link(job_to_job)[1]
-    job_to_machine_link_src, job_to_machine_link_dst = tensor_to_link(job_to_machine)[0], tensor_to_link(job_to_machine)[1]
+    job_to_job_link_src, job_to_job_link_dst = tensor_to_link(job_to_job)
+    job_to_machine_link_src, job_to_machine_link_dst = tensor_to_link(job_to_machine)
 
     g = dgl.heterograph({('job', 'to_job', 'job'): ([], []),
                          ('job', 'to_machine', 'machine'): ([], []),
