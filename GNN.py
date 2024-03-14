@@ -40,7 +40,17 @@ class GraphNN(nn.Module):
     def __init__(self, output_features_number=6):
         super(GraphNN, self).__init__()
         self.output_features_number = output_features_number
-        self.conv = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=6, num_heads=3, allow_zero_in_degree=True)
+
+        num_heads = 3
+        self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=8, num_heads=num_heads, allow_zero_in_degree=True)
+        self.conv2 = EdgeGATConv(in_feats=8, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True)
+        self.conv3 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32, num_heads=num_heads, allow_zero_in_degree=True)
+        self.linear1 = nn.Sequential(nn.Linear(32, 16),
+                                     nn.LeakyReLU(),
+                                     nn.Linear(16, 4),
+                                     nn.LeakyReLU(),
+                                     nn.Linear(4, 1))
+        self.linear2 = nn.Linear(num_heads, 1)
 
 
     def forward(self, Graph, h: list, L: list, W, P, N):
@@ -88,9 +98,16 @@ class GraphNN(nn.Module):
         edge_features = torch.cat((m_to_m_edge_features, other_edge_features), dim=0)
 
 
-        new_node_feats = self.conv(dgl_Graph, node_features, edge_features)
+        fst_time_node_feats = self.conv1(dgl_Graph, node_features, edge_features)
+        snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edge_features)
+        trd_time_node_feats = self.conv3(dgl_Graph, snd_time_node_feats.mean(dim=1), edge_features)
 
-        return new_node_feats.shape
+        feats = self.linear1(trd_time_node_feats).view(numberOfJMT, -1)
+        feats = self.linear2(feats)
+        feat = torch.max(feats, dim=0).values
+
+        return feat
+
 
 
     def mask(self, Graph: torch.tensor):
