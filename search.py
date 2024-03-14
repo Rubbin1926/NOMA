@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import ConcatDataset
-from GNN_tmp import GraphNN
+from GNN import GraphNN
 from env import NOMAenv
 import time
 start_time = time.time()
