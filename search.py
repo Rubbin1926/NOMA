@@ -68,7 +68,7 @@ def validate(model: heteroGNN, dataset: Read_Dataset):
     cor, num = 0, dataset.__len__()
     for X, y, para in dataset:
         pred = model.forward(X.type(torch.float32), para[0], para[1], para[2], para[3], para[4])[0]
-        if torch.abs(pred - y) / y < 0.2:
+        if torch.abs((pred - y) / y) < 0.2:
             cor += 1
     acc = cor / num
     return acc
