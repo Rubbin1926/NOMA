@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import ConcatDataset
-from heteroGNN import heteroGNN
+from GNN_tmp import GraphNN
 from env import NOMAenv
 import time
 start_time = time.time()
@@ -25,7 +25,8 @@ def find(Graph, Dataset, env):
     mask = env.mask(Graph)
 
     if torch.sum(mask) == 0:
-        Dataset[Graph] = (torch.zeros_like(Graph), Graph, env.calculate_time_dummy(Graph), env.get_parameters())
+        ###注意这里将时间取log了###
+        Dataset[Graph] = (torch.zeros_like(Graph), Graph, torch.log(env.calculate_time_dummy(Graph)), env.get_parameters())
         return Graph, env.calculate_time_dummy(Graph)
 
     if Graph in Dataset:
@@ -43,7 +44,8 @@ def find(Graph, Dataset, env):
             A_star = action
             G_star = G_
 
-    Dataset[Graph] = (A_star, G_star, V_star, env.get_parameters())
+    ###注意这里将时间取log了###
+    Dataset[Graph] = (A_star, G_star, torch.log(V_star), env.get_parameters())
     return G_star, V_star
 
 # 3, 16, 136, 1677, 27751, 586018, 15226086
@@ -64,12 +66,14 @@ class Read_Dataset(Dataset):
         return x, y, parameters
 
 
-def validate(model: heteroGNN, dataset: Read_Dataset):
+def validate(model: GraphNN, dataset: Read_Dataset):
     cor, num = 0, dataset.__len__()
     for X, y, para in dataset:
         pred = model.forward(X.type(torch.float32), para[0], para[1], para[2], para[3], para[4])[0]
-        if torch.abs(pred - y) / y < 0.2:
+        if torch.abs((pred - y) / y) < 0.2:
             cor += 1
+    print(f"""cor = {cor}""")
+    print(f"""num = {num}""")
     acc = cor / num
     return acc
 
@@ -88,7 +92,7 @@ def main():
     numberOfMachines = observation.shape[1] - numberOfJobs
 
     train_datasets = []
-    for i in range(3):
+    for i in range(5):
         tmpDataSet = {}
         env_train = NOMAenv()
         observation, info = env_train.reset(seed=42)
@@ -104,12 +108,11 @@ def main():
 
     # dataloader = DataLoader(Train_dataset, batch_size=64, shuffle=False)
 
-    gnn = heteroGNN(numberOfJobs, numberOfMachines,
-                    job_output_features_number=32, machine_output_features_number=32)
-    optimizer = torch.optim.Adam(gnn.parameters(), lr=0.0001, weight_decay=1e-6)
+    gnn = GraphNN()
+    optimizer = torch.optim.Adam(gnn.parameters(), lr=0.01, weight_decay=1e-6)
     loss_f = nn.MSELoss()
 
-    for i in range(41):
+    for i in range(21):
         gnn.train()
         for X, y, para in Train_dataset:
             pre_y = gnn.forward(X.type(torch.float32), para[0], para[1], para[2], para[3], para[4])[0]
@@ -130,7 +133,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
- # 加层数
- # machine取max
