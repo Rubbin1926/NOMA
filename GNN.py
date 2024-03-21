@@ -87,14 +87,14 @@ class GraphNN(nn.Module):
         dgl_Graph = tensor_to_dgl(Graph_edited)
 
 
-        # machine与machine边的feature为T矩阵对应的时间，其余边的feature都为1
+        # job与job边的feature为T矩阵对应的时间，其余边的feature都为0
         numberOfEdges = dgl_Graph.num_edges()
         time_matrix = build_time_matrix(jobList, numberOfJobs, W, P, N)[0]
         small_Graph = Graph[:, :numberOfJobs]
         indices = torch.nonzero(small_Graph == 1)
         extracted_elements = time_matrix[indices[:, 0], indices[:, 1]]
         m_to_m_edge_features = extracted_elements.view(-1, 1)
-        other_edge_features = torch.ones(numberOfEdges - m_to_m_edge_features.shape[0], 1)
+        other_edge_features = torch.zeros(numberOfEdges - m_to_m_edge_features.shape[0], 1)
         edge_features = torch.cat((m_to_m_edge_features, other_edge_features), dim=0)
 
 
@@ -107,7 +107,6 @@ class GraphNN(nn.Module):
         feat = torch.max(feats, dim=0).values
 
         return feat
-
 
 
     def mask(self, Graph: torch.tensor):
