@@ -5,7 +5,10 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import ConcatDataset
 from GNN import GraphNN
 from env import NOMAenv
+import wandb
 import time
+
+wandb.login(key="a92a309a25837dfaeac912d8a533448c9bb7399a")
 start_time = time.time()
 
 
@@ -79,7 +82,6 @@ def validate(model: GraphNN, dataset: Read_Dataset):
 
 
 def main():
-
     # 生成test数据集
     env_test = NOMAenv()
     testDataSet = {}
@@ -108,11 +110,23 @@ def main():
 
     # dataloader = DataLoader(Train_dataset, batch_size=64, shuffle=False)
 
-    gnn = GraphNN()
-    optimizer = torch.optim.Adam(gnn.parameters(), lr=0.01, weight_decay=1e-6)
-    loss_f = nn.MSELoss()
 
-    for i in range(21):
+    lr = 0.001
+    epochs = 21
+    gnn = GraphNN()
+    optimizer = torch.optim.Adam(gnn.parameters(), lr=lr, weight_decay=1e-6)
+    loss_f = nn.MSELoss()
+    run = wandb.init(
+        # Set the project where this run will be logged
+        project="NOMA",
+        # Track hyperparameters and run metadata
+        config={
+            "learning_rate": lr,
+            "epochs": epochs,
+        },
+    )
+
+    for i in range(epochs):
         gnn.train()
         for X, y, para in Train_dataset:
             pre_y = gnn.forward(X.type(torch.float32), para[0], para[1], para[2], para[3], para[4])[0]
@@ -123,13 +137,16 @@ def main():
             optimizer.step()
         print(f"""i = {i} loss = {loss}""")
 
-        if i % 2 == 0:
-            gnn.eval()
-            acc_train = validate(gnn, Train_dataset)
-            acc_test = validate(gnn, Test_dataset)
-            print(f"### After {i}, acc_train = {acc_train}")
-            print(f"### After {i}, acc_test = {acc_test}")
+        gnn.eval()
+        acc_train = validate(gnn, Train_dataset)
+        acc_test = validate(gnn, Test_dataset)
+        print(f"### After {i}, acc_train = {acc_train}")
+        print(f"### After {i}, acc_test = {acc_test}")
+
+        wandb.log({"acc_train": acc_train, "acc_test": acc_test, "loss": loss})
 
 
 if __name__ == "__main__":
     main()
+
+# stable baseline 3
