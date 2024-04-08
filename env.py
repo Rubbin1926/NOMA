@@ -1,10 +1,15 @@
 import torch
 import math
-import gym
 from typing import Optional
 import random
 import numpy as np
 import sys
+import gymnasium as gym
+from gymnasium import spaces
+
+
+numberOfJobs = 2
+numberOfMachines = 2
 
 
 def build_time_matrix(jobList, numberOfJobs, W, P, n):
@@ -29,9 +34,6 @@ def sample_env():
     # numberOfJobs = random.randint(8, 90)
     # numberOfMachines = random.randint(2, 12)
 
-    numberOfJobs = 3
-    numberOfMachines = 2
-
     """Just Int For Test"""
     # h = np.abs(np.random.normal(10, 1, numberOfJobs)).tolist()
     # L = np.abs(np.random.normal(100, 10, numberOfJobs)).tolist()
@@ -54,22 +56,21 @@ def sample_env():
     n = (10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)
     return (h, L, numberOfJobs, numberOfMachines, W, P, n)
 
+
 class NOMAenv(gym.Env):
-    #jobs:[[h,L],[],...,[]]
     def __init__(self):
-        pass
-        # jobs = list(zip(h, L))
-        # self.jobList = sorted(jobs, key=lambda x: x[0], reverse=True)
-        # self.numberOfMachines = numberOfMachines
-        # self.numberOfJobs = len(self.jobList)
-        # self.W, self.P, self.n = W, P, n
-        #
-        # self.G = torch.zeros((self.numberOfJobs, self.numberOfJobs + self.numberOfMachines))
-        # self.T = build_time_matrix(self.jobList, self.numberOfJobs, W, P, n)[0]
-        # self.T_list = build_time_matrix(self.jobList, self.numberOfJobs, W, P, n)[1]
-        #
-        # #test case
-        # self.G = torch.tensor([[0, 1, 0, 0, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 1]]).float()
+        self.observation_space = spaces.Dict(
+            {
+                "Graph": spaces.Box(0, 1, shape=(numberOfJobs, numberOfJobs+numberOfMachines), dtype=int),
+                "h": spaces.Box(2e-12, 9e-10, shape=(numberOfJobs,), dtype=float),
+                "L": spaces.Box(1, 1024, shape=(numberOfJobs,), dtype=float),
+                "W": spaces.Box(0, 0.18, dtype=float),
+                "P": spaces.Box(0.1, 0.1, dtype=float),
+                "N": spaces.Box(0, 8e-16, dtype=float),
+            }
+        )
+
+        self.action_space = spaces.Box(0, 1, shape=(numberOfJobs, numberOfJobs+numberOfMachines), dtype=int)
 
 
     def calculate_time_nodummy(self, Graph):
@@ -90,28 +91,6 @@ class NOMAenv(gym.Env):
         return torch.max(totalTime_dummy, self.calculate_time_nodummy(Graph))
 
 
-    def mask(self, Graph: torch.tensor):
-        left = torch.ones((Graph.size()[0], Graph.size()[0]))
-        right = torch.ones((Graph.size()[0], Graph.size()[1]-Graph.size()[0]))
-        row = torch.sum(Graph, dim=1, keepdim=True)
-        col = torch.sum(Graph, dim=0, keepdim=True)
-
-        left = left - row - torch.t(row) - col[:, 0:Graph.size()[0]] - torch.t(col[:, 0:Graph.size()[0]])
-        left = torch.where(left == 1, torch.tensor(1).float(), torch.tensor(0).float())
-        left = left.triu(diagonal=1)
-        right -= row
-
-        return torch.cat((left, right), dim=1)
-
-
-    def step(self, Action):
-        self.G += Action
-        reward = self.reward(self.G)
-        mask = self.mask(self.G)
-        is_done = self.is_done()
-        return (self.G, reward, is_done, False, {"action_mask": mask})
-
-
     def reset(
         self,
         *,
@@ -127,10 +106,29 @@ class NOMAenv(gym.Env):
         self.T = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[0]
         self.T_list = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[1]
 
-        #test case
-        # self.G = torch.tensor([[0, 1, 0, 0, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 1]]).float()
+        return (self.get_obs(), self.get_info())
 
-        return (self.G, {"action_mask": self.mask(self.G)})
+
+    def step(self, Action):
+        self.G += Action
+        reward = self.reward(self.G)
+        mask = self.mask(self.G)
+        is_done = self.is_done()
+        return (self.get_obs(), reward, is_done, False, {"action_mask": mask})
+
+
+    def mask(self, Graph: torch.tensor):
+        left = torch.ones((Graph.size()[0], Graph.size()[0]))
+        right = torch.ones((Graph.size()[0], Graph.size()[1]-Graph.size()[0]))
+        row = torch.sum(Graph, dim=1, keepdim=True)
+        col = torch.sum(Graph, dim=0, keepdim=True)
+
+        left = left - row - torch.t(row) - col[:, 0:Graph.size()[0]] - torch.t(col[:, 0:Graph.size()[0]])
+        left = torch.where(left == 1, torch.tensor(1).float(), torch.tensor(0).float())
+        left = left.triu(diagonal=1)
+        right -= row
+
+        return torch.cat((left, right), dim=1)
 
 
     def sample(self):
@@ -143,6 +141,22 @@ class NOMAenv(gym.Env):
             sampleMatrix[selected_index[0], selected_index[1]] = 1
 
         return sampleMatrix
+
+
+    def get_obs(self):
+        return {
+                "Graph": self.G,
+                "h": self.h,
+                "L": self.L,
+                "W": self.W,
+                "P": self.P,
+                "N": self.n
+        }
+
+    def get_info(self):
+        return {
+            "action_mask": self.mask(self.G)
+        }
 
 
     def get_parameters(self):
@@ -164,32 +178,7 @@ class NOMAenv(gym.Env):
         sys.exit()
 
 
-
-# tmp test
-# aaa = NOMAenv()
-# aaa.reset()
-# t_d = aaa.calculate_time_dummy(Graph=torch.tensor([[0, 1, 0, 0, 0, 0],
-#                                                    [0, 0, 0, 0, 1, 0],
-#                                                    [0, 0, 0, 0, 0, 1],
-#                                                    [0, 0, 0, 0, 0, 1]]).float())
-# t_nd = aaa.calculate_time_nodummy(Graph=torch.tensor([[0, 1, 0, 0, 0, 0],
-#                                                       [0, 0, 0, 0, 1, 0],
-#                                                       [0, 0, 0, 0, 0, 1],
-#                                                       [0, 0, 0, 0, 0, 1]]).float())
-# ma = aaa.mask(Graph=torch.tensor([[0, 0, 0, 0, 0, 0],
-#                                   [0, 0, 0, 0, 0, 0],
-#                                   [0, 0, 0, 1, 0, 0],
-#                                   [0, 0, 0, 0, 0, 0]]).float())
-# re = aaa.reward(Graph=torch.tensor([[0, 1, 0, 0, 0, 0],
-#                                     [0, 0, 0, 0, 1, 0],
-#                                     [0, 0, 0, 0, 0, 1],
-#                                     [0, 0, 0, 0, 0, 1]]).float())
-# action = aaa.step(Action=torch.tensor([[0, 0, 0, 0, 0, 0],
-#                                          [0, 0, 0, 0, 0, 0],
-#                                          [0, 0, 0, 0, 0, 0],
-#                                          [0, 0, 0, 0, 0, 0]]).float())
-# print(f"""time_dummy = {t_d}""")
-# print(f"""time_nodummy = {t_nd}""")
-# print(f"""mask = {ma}""")
-# print(f"""reward = {re}""")
-# print(f"""action = {action}""")
+if __name__ == "__main__":
+    env = NOMAenv()
+    env.reset(seed=42)
+    print(env.get_obs())
