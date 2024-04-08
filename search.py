@@ -86,19 +86,19 @@ def main():
     env_test = NOMAenv()
     testDataSet = {}
     observation, info = env_test.reset(seed=42)
-    find(observation, testDataSet, env_test)
+    find(observation["Graph"], testDataSet, env_test)
     Test_dataset = Read_Dataset(testDataSet)
 
     # 获取重要参数
-    numberOfJobs = observation.shape[0]
-    numberOfMachines = observation.shape[1] - numberOfJobs
+    numberOfJobs = observation["Graph"].shape[0]
+    numberOfMachines = observation["Graph"].shape[1] - numberOfJobs
 
     train_datasets = []
     for i in range(5):
         tmpDataSet = {}
         env_train = NOMAenv()
         observation, info = env_train.reset(seed=42)
-        find(observation, tmpDataSet, env_train)
+        find(observation["Graph"], tmpDataSet, env_train)
         tmp_Train_dataset = Read_Dataset(tmpDataSet)
         train_datasets.append(tmp_Train_dataset)
 
@@ -112,7 +112,7 @@ def main():
 
 
     lr = 0.001
-    epochs = 21
+    epochs = 201
     gnn = GraphNN()
     optimizer = torch.optim.Adam(gnn.parameters(), lr=lr, weight_decay=1e-6)
     loss_f = nn.MSELoss()
@@ -148,5 +148,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# stable baseline 3
