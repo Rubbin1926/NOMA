@@ -57,6 +57,29 @@ def sample_env():
     return (h, L, numberOfJobs, numberOfMachines, W, P, n)
 
 
+def ppoActiontoGraph(ppoAction: int):
+    action = torch.zeros((numberOfJobs, numberOfJobs+numberOfMachines))
+    if ppoAction < (numberOfJobs*(numberOfJobs-1)//2):
+        number = ppoAction + 1
+        n = numberOfJobs - 1
+        count = 0
+        while number > 0:
+            number -= n
+            count += n
+            n -= 1
+        row = (numberOfJobs - n - 1) - 1
+        col = number - 1 - numberOfMachines
+    else:
+        number = ppoAction - (numberOfJobs*(numberOfJobs-1)//2)
+        print(f"""number = {number}""")
+        row = number // 2
+        col = number % 2 + numberOfJobs
+
+    action[row][col] = 1
+    return action
+
+
+
 class NOMAenv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
@@ -70,7 +93,7 @@ class NOMAenv(gym.Env):
             }
         )
 
-        self.action_space = spaces.Box(0, 1, shape=(numberOfJobs, numberOfJobs+numberOfMachines), dtype=int)
+        self.action_space = spaces.Discrete((numberOfJobs*(numberOfJobs-1)//2) + (numberOfJobs*numberOfMachines))
 
 
     def calculate_time_nodummy(self, Graph):
