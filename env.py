@@ -71,7 +71,6 @@ def ppoActiontoGraph(ppoAction: int):
         col = number - 1 - numberOfMachines
     else:
         number = ppoAction - (numberOfJobs*(numberOfJobs-1)//2)
-        print(f"""number = {number}""")
         row = number // 2
         col = number % 2 + numberOfJobs
 
