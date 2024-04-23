@@ -1,7 +1,6 @@
 import dgl
 import torch
 from torch import nn
-from torch.nn import functional as F
 import math
 from dgl.nn import EdgeGATConv
 
@@ -122,8 +121,8 @@ class GraphNN(nn.Module):
 
 
     def mask(self, Graph: torch.tensor):
-        left = torch.ones((Graph.size()[0], Graph.size()[0]))
-        right = torch.ones((Graph.size()[0], Graph.size()[1] - Graph.size()[0]))
+        left = torch.ones((Graph.size()[0], Graph.size()[0])).to(device)
+        right = torch.ones((Graph.size()[0], Graph.size()[1] - Graph.size()[0])).to(device)
         row = torch.sum(Graph, dim=1, keepdim=True)
         col = torch.sum(Graph, dim=0, keepdim=True)
 
@@ -143,5 +142,10 @@ if __name__ == "__main__":
                                    [0, 0, 0, 0, 1, 0],
                                    [0, 0, 0, 0, 0, 0],
                                    [0, 0, 0, 0, 0, 1]]).to(device), [1, 2, 3, 4], [5, 4, 3, 2], 10, 15, 20)
+
+    print(dd.mask(torch.tensor([[0, 1, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 1, 0],
+                                [0, 0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0, 1]]).to(device)))
 
     print(ret)
