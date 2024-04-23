@@ -6,6 +6,9 @@ import math
 from dgl.nn import EdgeGATConv
 
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def build_time_matrix(jobList, numberOfJobs, W, P, n):
     """构建Time矩阵，下半部分全为0"""
     time_matrix = torch.zeros((numberOfJobs, numberOfJobs))
@@ -42,59 +45,68 @@ class GraphNN(nn.Module):
         self.output_features_number = output_features_number
 
         num_heads = 3
-        self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=8, num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv2 = EdgeGATConv(in_feats=8, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv3 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32, num_heads=num_heads, allow_zero_in_degree=True)
+        self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=8, num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv2 = EdgeGATConv(in_feats=8, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv3 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32, num_heads=num_heads, allow_zero_in_degree=True).to(device)
         self.linear1 = nn.Sequential(nn.Linear(32, 16),
                                      nn.LeakyReLU(),
                                      nn.Linear(16, 4),
                                      nn.LeakyReLU(),
-                                     nn.Linear(4, 1))
-        self.linear2 = nn.Linear(num_heads, 1)
+                                     nn.Linear(4, 1)).to(device)
+        self.linear2 = nn.Linear(num_heads, 1).to(device)
 
 
-    def forward(self, Graph, h: list, L: list, W, P, N):
-        numberOfJobs = len(h)
+    def forward(self, Graph, h, L, W, P, N):
+        if isinstance(h, list):
+            numberOfJobs = len(h)
+            jobs = list(zip(h, L))
+        elif isinstance(h, torch.Tensor):
+            numberOfJobs = h.shape[1]
+            jobs = list(zip(h.flatten().tolist(), L.flatten().tolist()))
+            W, P, N = W[0], P[0], N[0]
+        else:
+            raise TypeError("What is h???")
+
         numberOfMachines = Graph.shape[1] - numberOfJobs
-        jobs = list(zip(h, L))
-        jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True))
-        otherFeatures = torch.tensor([W, P, N, 1])  # 1代表这个feature属于machine
+        jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True)).to(device)
+        otherFeatures = torch.tensor([W, P, N, 1]).to(device)  # 1代表这个feature属于machine
+
 
         # jobFeatures形状为 n*6(h_i,L_i,W_i,P_i,n_i,1) 1代表这个feature属于machine
         jobFeatures = torch.cat((jobList, otherFeatures.unsqueeze(1).t().expand(jobList.size(0), -1)), dim=1)
 
         # machineFeatures填充全为2，大小为numberOfMachines*6
-        machineFeatures = torch.ones((numberOfMachines, 6)) * 2
+        machineFeatures = (torch.ones((numberOfMachines, 6)) * 2).to(device)
 
         # terminalFeatures填充全为3，大小为1*6
-        terminalFeature = torch.ones((1, 6)) * 3
+        terminalFeature = (torch.ones((1, 6)) * 3).to(device)
 
         node_features = torch.cat((jobFeatures, machineFeatures, terminalFeature), dim=0)
 
 
         # 在Graph右侧增加一列0，代表terminal
-        add_terminal_tensor = torch.zeros(numberOfJobs, 1)
+        add_terminal_tensor = torch.zeros(numberOfJobs, 1).to(device)
         Graph_with_terminal = torch.cat((Graph, add_terminal_tensor), dim=1)
 
         # 下方把machine连terminal的位置填1，其余填0组成方阵
         numberOfJMT = Graph_with_terminal.shape[1]
-        tmp_tensor_left = torch.zeros((numberOfJMT - numberOfJobs, numberOfJMT - 1))
-        tmp_tensor_right = torch.ones((numberOfJMT - numberOfJobs, 1))
+        tmp_tensor_left = torch.zeros((numberOfJMT - numberOfJobs, numberOfJMT - 1)).to(device)
+        tmp_tensor_right = torch.ones((numberOfJMT - numberOfJobs, 1)).to(device)
         tmp_tensor_right[-1][-1] = 0
         add_zero_tensor = torch.cat((tmp_tensor_left, tmp_tensor_right), dim=1)
         Graph_edited = torch.cat((Graph_with_terminal, add_zero_tensor), dim=0)
 
-        dgl_Graph = tensor_to_dgl(Graph_edited)
+        dgl_Graph = tensor_to_dgl(Graph_edited).to(device)
 
 
         # job与job边的feature为T矩阵对应的时间，其余边的feature都为0
         numberOfEdges = dgl_Graph.num_edges()
-        time_matrix = build_time_matrix(jobList, numberOfJobs, W, P, N)[0]
-        small_Graph = Graph[:, :numberOfJobs]
-        indices = torch.nonzero(small_Graph == 1)
+        time_matrix = build_time_matrix(jobList, numberOfJobs, W, P, N)[0].to(device)
+        small_Graph = Graph[:, :numberOfJobs].to(device)
+        indices = torch.nonzero(small_Graph == 1).to(device)
         extracted_elements = time_matrix[indices[:, 0], indices[:, 1]]
         m_to_m_edge_features = extracted_elements.view(-1, 1)
-        other_edge_features = torch.zeros(numberOfEdges - m_to_m_edge_features.shape[0], 1)
+        other_edge_features = torch.zeros(numberOfEdges - m_to_m_edge_features.shape[0], 1).to(device)
         edge_features = torch.cat((m_to_m_edge_features, other_edge_features), dim=0)
 
 
@@ -130,6 +142,6 @@ if __name__ == "__main__":
     ret = dd.forward(torch.tensor([[0, 1, 0, 0, 0, 0],
                                    [0, 0, 0, 0, 1, 0],
                                    [0, 0, 0, 0, 0, 0],
-                                   [0, 0, 0, 0, 0, 1]]), [1, 2, 3, 4], [5, 4, 3, 2], 10, 15, 20)
+                                   [0, 0, 0, 0, 0, 1]]).to(device), [1, 2, 3, 4], [5, 4, 3, 2], 10, 15, 20)
 
     print(ret)
