@@ -60,9 +60,9 @@ class GraphNN(nn.Module):
             numberOfJobs = len(h)
             jobs = list(zip(h, L))
         elif isinstance(h, torch.Tensor):
-            numberOfJobs = h.shape[1]
+            numberOfJobs = h.numel()
             jobs = list(zip(h.flatten().tolist(), L.flatten().tolist()))
-            W, P, N = W[0], P[0], N[0]
+            W, P, N = W.item(), P.item(), N.item()
         else:
             raise TypeError("What is h???")
 
@@ -137,15 +137,13 @@ class GraphNN(nn.Module):
 
 if __name__ == "__main__":
     dd = GraphNN()
+    obs = {'Graph': torch.tensor([[0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12, 7.3886e-12, 2.2969e-12], device='cuda:0'), 'L': torch.tensor([506, 427, 102, 973], device='cuda:0'), 'W': torch.tensor(90000., device='cuda:0'), 'P': torch.tensor(0.1000, device='cuda:0'), 'N': torch.tensor(3.5830e-16, device='cuda:0')}
 
-    ret = dd.forward(torch.tensor([[0, 1, 0, 0, 0, 0],
-                                   [0, 0, 0, 0, 1, 0],
-                                   [0, 0, 0, 0, 0, 0],
-                                   [0, 0, 0, 0, 0, 1]]).to(device), [1, 2, 3, 4], [5, 4, 3, 2], 10, 15, 20)
+    ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])
 
-    print(dd.mask(torch.tensor([[0, 1, 0, 0, 0, 0],
-                                [0, 0, 0, 0, 1, 0],
-                                [0, 0, 0, 0, 0, 0],
-                                [0, 0, 0, 0, 0, 1]]).to(device)))
+    print(dd.mask(obs['Graph']))
 
     print(ret)
