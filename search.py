@@ -95,7 +95,7 @@ class Read_Dataset(Dataset):
 def validate(model: GraphNN, dataset: Read_Dataset):
     cor, num = 0, dataset.__len__()
     for X, y, para in dataset:
-        pred = model.forward(X.type(torch.float32), para[0], para[1], para[2], para[3], para[4])
+        pred = model.forward(X.type(torch.float32), para[0], para[1], para[2], para[3], para[4])[0]
         if torch.abs((pred - y) / y) < 0.2:
             cor += 1
     print(f"""cor = {cor}""")
@@ -152,7 +152,7 @@ def main():
     for i in range(epochs):
         gnn.train()
         for X, y, para in Train_dataset:
-            pre_y = gnn.forward(X.type(torch.float32).to(device), para[0], para[1], para[2], para[3], para[4])
+            pre_y = gnn.forward(X.type(torch.float32).to(device), para[0], para[1], para[2], para[3], para[4])[0]
             loss = loss_f(pre_y, y.type(torch.float32).to(device))
 
             optimizer.zero_grad()
