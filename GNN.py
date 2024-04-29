@@ -44,10 +44,10 @@ class GraphNN(nn.Module):
         self.output_features_number = output_features_number
 
         num_heads = 3
-        self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=8, num_heads=num_heads, allow_zero_in_degree=True).to(device)
-        self.conv2 = EdgeGATConv(in_feats=8, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True).to(device)
-        self.conv3 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32, num_heads=num_heads, allow_zero_in_degree=True).to(device)
-        self.linear1 = nn.Sequential(nn.Linear(32, 16),
+        self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv2 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32, num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv3 = EdgeGATConv(in_feats=32, edge_feats=1, out_feats=64, num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.linear1 = nn.Sequential(nn.Linear(64, 16),
                                      nn.LeakyReLU(),
                                      nn.Linear(16, 4),
                                      nn.LeakyReLU(),
@@ -113,11 +113,16 @@ class GraphNN(nn.Module):
         snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edge_features)
         trd_time_node_feats = self.conv3(dgl_Graph, snd_time_node_feats.mean(dim=1), edge_features)
 
+        # 输出 1*64 tensor
+        tensor64 = torch.mean(trd_time_node_feats, dim=0)
+        tensor64 = torch.mean(tensor64, dim=0, keepdim=True)
+
+        # 输出value
         feats = self.linear1(trd_time_node_feats).view(numberOfJMT, -1)
         feats = self.linear2(feats)
-        feat = torch.max(feats, dim=0).values
+        feat = torch.max(feats)
 
-        return feat
+        return feat, tensor64
 
 
     def mask(self, Graph: torch.tensor):
@@ -142,7 +147,7 @@ if __name__ == "__main__":
                                         [0., 0., 0., 0., 0., 0.],
                                         [0., 0., 0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12, 7.3886e-12, 2.2969e-12], device='cuda:0'), 'L': torch.tensor([506, 427, 102, 973], device='cuda:0'), 'W': torch.tensor(90000., device='cuda:0'), 'P': torch.tensor(0.1000, device='cuda:0'), 'N': torch.tensor(3.5830e-16, device='cuda:0')}
 
-    ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])
+    ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])[0]
 
     print(dd.mask(obs['Graph']))
 
