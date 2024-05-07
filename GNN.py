@@ -1,8 +1,11 @@
 import dgl
 import torch
 from torch import nn
+import torch.nn.functional as F
 import math
 from dgl.nn import EdgeGATConv
+from my_categorical_distribution import myCategoricalDistribution
+from env import numberOfJobs, numberOfMachines
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,9 +42,8 @@ def tensor_to_dgl(tensor):  # 输入进来的tensor是增加terminal并且下方
 
 
 class GraphNN(nn.Module):
-    def __init__(self, output_features_number=6):
+    def __init__(self):
         super(GraphNN, self).__init__()
-        self.output_features_number = output_features_number
 
         num_heads = 3
         self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True).to(device)
@@ -57,16 +59,13 @@ class GraphNN(nn.Module):
 
     def forward(self, Graph, h, L, W, P, N):
         if isinstance(h, list):
-            numberOfJobs = len(h)
             jobs = list(zip(h, L))
         elif isinstance(h, torch.Tensor):
-            numberOfJobs = h.numel()
             jobs = list(zip(h.flatten().tolist(), L.flatten().tolist()))
             W, P, N = W.item(), P.item(), N.item()
         else:
             raise TypeError("What is h???")
 
-        numberOfMachines = Graph.shape[1] - numberOfJobs
         jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True)).to(device)
         otherFeatures = torch.tensor([W, P, N, 1]).to(device)  # 1代表这个feature属于machine
 
@@ -112,17 +111,23 @@ class GraphNN(nn.Module):
         fst_time_node_feats = self.conv1(dgl_Graph, node_features, edge_features)
         snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edge_features)
         trd_time_node_feats = self.conv3(dgl_Graph, snd_time_node_feats.mean(dim=1), edge_features)
+        trd_time_node_feats = trd_time_node_feats[:-1, ]
 
-        # 输出 1*64 tensor
-        tensor64 = torch.mean(trd_time_node_feats, dim=0)
-        tensor64 = torch.mean(tensor64, dim=0, keepdim=True)
+        reshaped_tensor = trd_time_node_feats.unsqueeze(0)
+        logit = F.interpolate(reshaped_tensor,
+                              size=(numberOfJobs, 1),
+                              mode='bilinear', align_corners=False).squeeze(0, -1).T  # shape: same as G
+        CD = myCategoricalDistribution(logit)
 
-        # 输出value
-        feats = self.linear1(trd_time_node_feats).view(numberOfJMT, -1)
-        feats = self.linear2(feats)
-        feat = torch.max(feats)
+        Q = logit - (1 - self.mask(Graph)) * 1e6
+        prob = torch.softmax(Q.flatten(), 0).reshape_as(Q)
 
-        return feat, tensor64
+        action = CD.action()
+        log_prob = torch.log(prob.flatten()[action])
+        entropy = CD.entropy(prob)
+        value = Q.flatten()[action]
+
+        return value, action, log_prob, entropy
 
 
     def mask(self, Graph: torch.tensor):
@@ -142,12 +147,10 @@ class GraphNN(nn.Module):
 
 if __name__ == "__main__":
     dd = GraphNN()
-    obs = {'Graph': torch.tensor([[0., 0., 0., 0., 0., 0.],
-                                        [0., 0., 0., 0., 0., 0.],
-                                        [0., 0., 0., 0., 0., 0.],
-                                        [0., 0., 0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12, 7.3886e-12, 2.2969e-12], device='cuda:0'), 'L': torch.tensor([506, 427, 102, 973], device='cuda:0'), 'W': torch.tensor(90000., device='cuda:0'), 'P': torch.tensor(0.1000, device='cuda:0'), 'N': torch.tensor(3.5830e-16, device='cuda:0')}
+    obs = {'Graph': torch.tensor([[0., 0., 0., 0.],
+                                        [0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12], device='cuda:0'), 'L': torch.tensor([506, 427], device='cuda:0'), 'W': torch.tensor(90000., device='cuda:0'), 'P': torch.tensor(0.1000, device='cuda:0'), 'N': torch.tensor(3.5830e-16, device='cuda:0')}
 
-    ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])[0]
+    ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])
 
     print(dd.mask(obs['Graph']))
 
