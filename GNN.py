@@ -4,7 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 import math
 from dgl.nn import EdgeGATConv
-from my_categorical_distribution import myCategoricalDistribution
+from torch.distributions import Categorical
 from env import numberOfJobs, numberOfMachines
 
 
@@ -67,10 +67,10 @@ class GraphNN(nn.Module):
             raise TypeError("What is h???")
 
         jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True)).to(device)
-        otherFeatures = torch.tensor([W, P, N, 1]).to(device)  # 1代表这个feature属于machine
+        otherFeatures = torch.tensor([W, P, N, 1]).to(device)  # 1代表这个feature属于job
 
 
-        # jobFeatures形状为 n*6(h_i,L_i,W_i,P_i,n_i,1) 1代表这个feature属于machine
+        # jobFeatures形状为 n*6(h_i,L_i,W_i,P_i,n_i,1) 1代表这个feature属于job
         jobFeatures = torch.cat((jobList, otherFeatures.unsqueeze(1).t().expand(jobList.size(0), -1)), dim=1)
 
         # machineFeatures填充全为2，大小为numberOfMachines*6
@@ -117,15 +117,22 @@ class GraphNN(nn.Module):
         logit = F.interpolate(reshaped_tensor,
                               size=(numberOfJobs, 1),
                               mode='bilinear', align_corners=False).squeeze(0, -1).T  # shape: same as G
-        CD = myCategoricalDistribution(logit)
 
         Q = logit - (1 - self.mask(Graph)) * 1e6
-        prob = torch.softmax(Q.flatten(), 0).reshape_as(Q)
+        prob = torch.softmax(Q.flatten(), 0)
+        CD = Categorical(probs=prob)
 
-        action = CD.action()
-        log_prob = torch.log(prob.flatten()[action])
-        entropy = CD.entropy(prob)
-        value = Q.flatten()[action]
+        action = CD.mode.view(1)
+        log_prob = torch.log(prob.flatten()[action]).view(1)
+        entropy = CD.entropy().view(1)
+        value = Q.flatten()[action].view((1, 1))
+
+        """
+        values.shape = [1, 1]
+        actions.shape = [1]
+        log_prob.shape = [1]
+        entropy.shape = [1], 不过无所谓size，因为ppo中直接mean的，entropy是None都行
+        """
 
         return value, action, log_prob, entropy
 
@@ -148,7 +155,7 @@ class GraphNN(nn.Module):
 if __name__ == "__main__":
     dd = GraphNN()
     obs = {'Graph': torch.tensor([[0., 0., 0., 0.],
-                                        [0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12], device='cuda:0'), 'L': torch.tensor([506, 427], device='cuda:0'), 'W': torch.tensor(90000., device='cuda:0'), 'P': torch.tensor(0.1000, device='cuda:0'), 'N': torch.tensor(3.5830e-16, device='cuda:0')}
+                                        [0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12], device='cuda:0'), 'L': torch.tensor([506, 427], device='cuda:0'), 'W': torch.tensor([90000.], device='cuda:0'), 'P': torch.tensor([0.1000], device='cuda:0'), 'N': torch.tensor([3.5830e-16], device='cuda:0')}
 
     ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])
 
