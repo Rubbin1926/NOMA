@@ -8,7 +8,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 
-numberOfJobs = 2
+numberOfJobs = 4
 numberOfMachines = 2
 
 
@@ -115,7 +115,7 @@ class NOMAenv(gym.Env):
         reward = self.reward(self.G)
         mask = self.mask(self.G)
         is_done = self.is_done()
-        return (self.get_obs(), reward, is_done, False, {"action_mask": mask})
+        return (self.get_obs(), reward * (not is_done), is_done, False, {"action_mask": mask})
 
 
     def mask(self, Graph: torch.tensor):
@@ -134,14 +134,20 @@ class NOMAenv(gym.Env):
 
     def sample(self):
         mask = self.mask(self.G)
-        sampleMatrix = torch.zeros_like(mask)
         indices = torch.nonzero(mask)
 
         if indices.numel() > 0:
             selected_index = random.choice(indices)
-            sampleMatrix[selected_index[0], selected_index[1]] = 1
+            index = selected_index[0] * mask.shape[1] + selected_index[1]
+        else:
+            raise ValueError("No available action")
 
-        return sampleMatrix
+        # sampleMatrix = torch.zeros_like(mask)
+        # if indices.numel() > 0:
+        #     selected_index = random.choice(indices)
+        #     sampleMatrix[selected_index[0], selected_index[1]] = 1
+
+        return index.clone().numpy()
 
 
     def get_obs(self):
@@ -169,10 +175,7 @@ class NOMAenv(gym.Env):
 
 
     def is_done(self):
-        if torch.sum(self.mask(self.G)):
-            return False
-        else:
-            return True
+        return torch.sum(self.mask(self.G)) == 0
 
 
     def close(self):
@@ -182,4 +185,13 @@ class NOMAenv(gym.Env):
 if __name__ == "__main__":
     env = NOMAenv()
     env.reset(seed=42)
-    print(env.get_obs())
+    for _ in range(20):
+        action = env.sample()
+        observation, reward, done, _, info = env.step(action)
+        print(f"""observation = {observation}""")
+        print(f"""reward = {reward}""")
+        print(f"""done = {done}""")
+        print(f"""info = {info}""")
+        print("_____________________________")
+        if done:
+            env.reset()
