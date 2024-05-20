@@ -46,9 +46,18 @@ class GraphNN(nn.Module):
         super(GraphNN, self).__init__()
 
         num_heads = 3
-        self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True).to(device)
-        self.conv2 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32, num_heads=num_heads, allow_zero_in_degree=True).to(device)
-        self.conv3 = EdgeGATConv(in_feats=32, edge_feats=1, out_feats=64, num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv0 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=8, num_heads=num_heads,
+                                 allow_zero_in_degree=True).to(device)
+        self.conv1 = EdgeGATConv(in_feats=8, edge_feats=1, out_feats=16, num_heads=num_heads,
+                                 allow_zero_in_degree=True).to(device)
+        self.conv2 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32,
+                                 num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv3 = EdgeGATConv(in_feats=32, edge_feats=1, out_feats=64,
+                                 num_heads=num_heads, allow_zero_in_degree=True).to(device)
+
+        self.bilinear = nn.Bilinear(64*num_heads, 64*num_heads, numberOfJobs).to(device)
+
+        self.linear = nn.Linear(numberOfJobs*(numberOfJobs+numberOfMachines), 1).to(device)
         self.linear1 = nn.Sequential(nn.Linear(64, 16),
                                      nn.LeakyReLU(),
                                      nn.Linear(16, 4),
@@ -107,18 +116,15 @@ class GraphNN(nn.Module):
         other_edge_features = torch.zeros(numberOfEdges - m_to_m_edge_features.shape[0], 1).to(device)
         edge_features = torch.cat((m_to_m_edge_features, other_edge_features), dim=0)
 
-
-        fst_time_node_feats = self.conv1(dgl_Graph, node_features, edge_features)
+        zro_time_node_feats = self.conv0(dgl_Graph, node_features, edge_features)
+        fst_time_node_feats = self.conv1(dgl_Graph, zro_time_node_feats.mean(dim=1), edge_features)
         snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edge_features)
         trd_time_node_feats = self.conv3(dgl_Graph, snd_time_node_feats.mean(dim=1), edge_features)
-        trd_time_node_feats = trd_time_node_feats[:-1, ]
+        reshaped_tensor = trd_time_node_feats[:-1, ].view(numberOfJobs+numberOfMachines, -1)
 
-        reshaped_tensor = trd_time_node_feats.unsqueeze(0)
-        logit = F.interpolate(reshaped_tensor,
-                              size=(numberOfJobs, 1),
-                              mode='bilinear', align_corners=False).squeeze(0, -1).T  # shape: same as G
+        logit = self.bilinear(reshaped_tensor, reshaped_tensor).t()
 
-        Q = logit - (1 - self.mask(Graph)) * 1e6
+        Q = 0.01*logit - (1 - self.mask(Graph)) * 1e16
         prob = torch.softmax(Q.flatten(), 0)
         CD = Categorical(probs=prob)
 
@@ -127,6 +133,10 @@ class GraphNN(nn.Module):
         entropy = CD.entropy().view(1)
         value = Q.flatten()[action].view((1, 1))
 
+        feats = self.linear1(trd_time_node_feats).view(numberOfJMT, -1)
+        feats = self.linear2(feats)
+        feat = torch.max(feats, dim=0).values
+
         """
         values.shape = [1, 1]
         actions.shape = [1]
@@ -134,7 +144,7 @@ class GraphNN(nn.Module):
         entropy.shape = [1], 不过无所谓size，因为ppo中直接mean的，entropy是None都行
         """
 
-        return value, action, log_prob, entropy
+        return feat, action, log_prob, entropy
 
 
     def mask(self, Graph: torch.tensor):
@@ -154,8 +164,10 @@ class GraphNN(nn.Module):
 
 if __name__ == "__main__":
     dd = GraphNN()
-    obs = {'Graph': torch.tensor([[0., 0., 0., 0.],
-                                        [0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12], device='cuda:0'), 'L': torch.tensor([506, 427], device='cuda:0'), 'W': torch.tensor([90000.], device='cuda:0'), 'P': torch.tensor([0.1000], device='cuda:0'), 'N': torch.tensor([3.5830e-16], device='cuda:0')}
+    obs = {'Graph': torch.tensor([[0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12, 7.3497e-12, 7.3497e-12], device='cuda:0'), 'L': torch.tensor([506, 427, 500, 450], device='cuda:0'), 'W': torch.tensor([90000.], device='cuda:0'), 'P': torch.tensor([0.1000], device='cuda:0'), 'N': torch.tensor([3.5830e-16], device='cuda:0')}
 
     ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])
 
