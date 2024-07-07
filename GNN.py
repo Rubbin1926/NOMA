@@ -60,9 +60,7 @@ class GraphNN(nn.Module):
         self.linear = nn.Linear(numberOfJobs*(numberOfJobs+numberOfMachines), 1).to(device)
         self.linear1 = nn.Sequential(nn.Linear(64, 16),
                                      nn.LeakyReLU(),
-                                     nn.Linear(16, 4),
-                                     nn.LeakyReLU(),
-                                     nn.Linear(4, 1)).to(device)
+                                     nn.Linear(16, 1)).to(device)
         self.linear2 = nn.Linear(num_heads, 1).to(device)
 
 
@@ -120,18 +118,21 @@ class GraphNN(nn.Module):
         fst_time_node_feats = self.conv1(dgl_Graph, zro_time_node_feats.mean(dim=1), edge_features)
         snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edge_features)
         trd_time_node_feats = self.conv3(dgl_Graph, snd_time_node_feats.mean(dim=1), edge_features)
+
         reshaped_tensor = trd_time_node_feats[:-1, ].view(numberOfJobs+numberOfMachines, -1)
 
-        logit = self.bilinear(reshaped_tensor, reshaped_tensor).t()
+        logit = 0.00001*(self.bilinear(reshaped_tensor, reshaped_tensor)/(16*3)).t()
 
-        Q = 0.01*logit - (1 - self.mask(Graph)) * 1e16
-        prob = torch.softmax(Q.flatten(), 0)
-        CD = Categorical(probs=prob)
+        Q = 0.01*logit - (1 - self.mask(Graph)) * 1e3
+        # print("Q", Q)
+        # prob = torch.softmax(Q.flatten(), 0)
+        value = torch.logsumexp(Q.flatten(), dim=-1).view((1, 1))
+        CD = Categorical(logits=(Q - (1 - self.mask(Graph)) * 1e10).flatten())
 
-        action = CD.mode.view(1)
-        log_prob = torch.log(prob.flatten()[action]).view(1)
+        action = CD.sample().view(1)
+        log_prob = CD.log_prob(action).view(1)
         entropy = CD.entropy().view(1)
-        value = Q.flatten()[action].view((1, 1))
+        # value = Q.flatten()[action].view((1, 1))
 
         feats = self.linear1(trd_time_node_feats).view(numberOfJMT, -1)
         feats = self.linear2(feats)
@@ -144,7 +145,7 @@ class GraphNN(nn.Module):
         entropy.shape = [1], 不过无所谓size，因为ppo中直接mean的，entropy是None都行
         """
 
-        return feat, action, log_prob, entropy
+        return value, action, log_prob, entropy
 
 
     def mask(self, Graph: torch.tensor):
