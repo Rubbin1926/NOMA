@@ -8,7 +8,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 
-numberOfJobs = 2
+numberOfJobs = 4
 numberOfMachines = 2
 
 
@@ -31,17 +31,7 @@ def build_time_matrix(jobList, numberOfJobs, W, P, n):
 
 
 def sample_env():
-    # numberOfJobs = random.randint(8, 90)
-    # numberOfMachines = random.randint(2, 12)
-
-    """Just Int For Test"""
-    # h = np.abs(np.random.normal(10, 1, numberOfJobs)).tolist()
-    # L = np.abs(np.random.normal(100, 10, numberOfJobs)).tolist()
-    # W = random.randint(1, 5)
-    # P = random.randint(1, 5)
-    # n = random.randint(1, 5)
-
-    """Parameters in paper"""
+    # Parameters in paper
     def h_distribution():
         d = random.uniform(0.1, 0.5)
         tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
@@ -49,11 +39,11 @@ def sample_env():
         _h = 1 / tmp1
         return _h
 
-    h = [h_distribution() for _ in range(numberOfJobs)]
-    L = np.random.randint(1, 1024, size=(numberOfJobs, )).tolist()
-    W = 180 / numberOfMachines * 1000
-    P = 0.1
-    n = (10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)
+    h = torch.tensor([h_distribution() for _ in range(numberOfJobs)])
+    L = torch.tensor(np.random.randint(1, 1024, size=(numberOfJobs, )).tolist())
+    W = torch.tensor(180 / numberOfMachines * 1000)
+    P = torch.tensor(0.1)
+    n = torch.tensor((10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000))
     return (h, L, numberOfJobs, numberOfMachines, W, P, n)
 
 
@@ -61,12 +51,12 @@ class NOMAenv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
             {
-                "Graph": spaces.Box(0, 1, shape=(numberOfJobs, numberOfJobs+numberOfMachines), dtype=int),
-                "h": spaces.Box(2e-12, 9e-10, shape=(numberOfJobs,), dtype=float),
-                "L": spaces.Box(1, 1024, shape=(numberOfJobs,), dtype=float),
-                "W": spaces.Box(0, 0.18, dtype=float),
-                "P": spaces.Box(0.1, 0.1, dtype=float),
-                "N": spaces.Box(0, 8e-16, dtype=float),
+                "Graph": spaces.Box(0, 1, shape=(numberOfJobs, numberOfJobs+numberOfMachines), dtype=np.int32),
+                "h": spaces.Box(2e-12, 9e-10, shape=(numberOfJobs,), dtype=np.float32),
+                "L": spaces.Box(1, 1024, shape=(numberOfJobs,), dtype=np.float32),
+                "W": spaces.Box(0, 0.18, dtype=np.float32),
+                "P": spaces.Box(0.1, 0.1, dtype=np.float32),
+                "N": spaces.Box(0, 8e-16, dtype=np.float32),
             }
         )
 
@@ -74,7 +64,7 @@ class NOMAenv(gym.Env):
 
 
     def action_to_tensor(self, numpyAction):
-        if type(numpyAction) == torch.tensor:
+        if isinstance(numpyAction, torch.Tensor):
             return numpyAction
         rowPosition = numpyAction // (numberOfJobs+numberOfMachines)
         colPosition = numpyAction % (numberOfJobs+numberOfMachines)
@@ -109,8 +99,8 @@ class NOMAenv(gym.Env):
     ):
         super().reset(seed=seed)
         self.h, self.L, self.numberOfJobs, self.numberOfMachines, self.W, self.P, self.n = sample_env()
-        jobs = list(zip(self.h, self.L))
-        self.jobList = sorted(jobs, key=lambda x: x[0], reverse=True)
+        jobs = list(zip(self.h.flatten().tolist(), self.L.flatten().tolist()))
+        self.jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True))
 
         self.G = torch.zeros((self.numberOfJobs, self.numberOfJobs + self.numberOfMachines))
         self.T = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[0]
@@ -125,12 +115,12 @@ class NOMAenv(gym.Env):
         reward = self.reward(self.G)
         mask = self.mask(self.G)
         is_done = self.is_done()
-        return (self.get_obs(), reward, is_done, False, {"action_mask": mask})
+        return (self.get_obs(), reward * is_done, is_done, False, {"action_mask": mask})
 
 
     def mask(self, Graph: torch.tensor):
         left = torch.ones((Graph.size()[0], Graph.size()[0]))
-        right = torch.ones((Graph.size()[0], Graph.size()[1]-Graph.size()[0]))
+        right = torch.ones((Graph.size()[0], Graph.size()[1] - Graph.size()[0]))
         row = torch.sum(Graph, dim=1, keepdim=True)
         col = torch.sum(Graph, dim=0, keepdim=True)
 
@@ -144,14 +134,20 @@ class NOMAenv(gym.Env):
 
     def sample(self):
         mask = self.mask(self.G)
-        sampleMatrix = torch.zeros_like(mask)  # 创建和a相同size的全0张量b
         indices = torch.nonzero(mask)
 
         if indices.numel() > 0:
             selected_index = random.choice(indices)
-            sampleMatrix[selected_index[0], selected_index[1]] = 1
+            index = selected_index[0] * mask.shape[1] + selected_index[1]
+        else:
+            raise ValueError("No available action")
 
-        return sampleMatrix
+        # sampleMatrix = torch.zeros_like(mask)
+        # if indices.numel() > 0:
+        #     selected_index = random.choice(indices)
+        #     sampleMatrix[selected_index[0], selected_index[1]] = 1
+
+        return index.clone().numpy()
 
 
     def get_obs(self):
@@ -179,11 +175,24 @@ class NOMAenv(gym.Env):
 
 
     def is_done(self):
-        if torch.sum(self.mask(self.G)):
-            return False
-        else:
-            return True
+        return torch.sum(self.mask(self.G)) == 0
 
 
     def close(self):
         sys.exit()
+
+
+if __name__ == "__main__":
+    env = NOMAenv()
+    env.reset(seed=42)
+    for _ in range(20):
+        action = env.sample()
+        observation, reward, done, _, info = env.step(action)
+        print("reward:", env.reward(env.G))
+        print(f"""observation = {observation}""")
+        print(f"""reward = {reward}""")
+        print(f"""done = {done}""")
+        print(f"""info = {info}""")
+        print("_____________________________")
+        if done:
+            env.reset()

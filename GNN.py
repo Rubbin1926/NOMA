@@ -1,9 +1,14 @@
 import dgl
 import torch
 from torch import nn
-from torch.nn import functional as F
+import torch.nn.functional as F
 import math
 from dgl.nn import EdgeGATConv
+from torch.distributions import Categorical
+from env import numberOfJobs, numberOfMachines
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def build_time_matrix(jobList, numberOfJobs, W, P, n):
@@ -37,81 +42,115 @@ def tensor_to_dgl(tensor):  # 输入进来的tensor是增加terminal并且下方
 
 
 class GraphNN(nn.Module):
-    def __init__(self, output_features_number=6):
+    def __init__(self):
         super(GraphNN, self).__init__()
-        self.output_features_number = output_features_number
 
         num_heads = 3
-        self.conv1 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=8, num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv2 = EdgeGATConv(in_feats=8, edge_feats=1, out_feats=16, num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv3 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32, num_heads=num_heads, allow_zero_in_degree=True)
-        self.linear1 = nn.Sequential(nn.Linear(32, 16),
+        self.conv0 = EdgeGATConv(in_feats=6, edge_feats=1, out_feats=8, num_heads=num_heads,
+                                 allow_zero_in_degree=True).to(device)
+        self.conv1 = EdgeGATConv(in_feats=8, edge_feats=1, out_feats=16, num_heads=num_heads,
+                                 allow_zero_in_degree=True).to(device)
+        self.conv2 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=32,
+                                 num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv3 = EdgeGATConv(in_feats=32, edge_feats=1, out_feats=64,
+                                 num_heads=num_heads, allow_zero_in_degree=True).to(device)
+
+        self.bilinear = nn.Bilinear(64*num_heads, 64*num_heads, numberOfJobs).to(device)
+
+        self.linear = nn.Linear(numberOfJobs*(numberOfJobs+numberOfMachines), 1).to(device)
+        self.linear1 = nn.Sequential(nn.Linear(64, 16),
                                      nn.LeakyReLU(),
-                                     nn.Linear(16, 4),
-                                     nn.LeakyReLU(),
-                                     nn.Linear(4, 1))
-        self.linear2 = nn.Linear(num_heads, 1)
+                                     nn.Linear(16, 1)).to(device)
+        self.linear2 = nn.Linear(num_heads, 1).to(device)
 
 
-    def forward(self, Graph, h: list, L: list, W, P, N):
-        numberOfJobs = len(h)
-        numberOfMachines = Graph.shape[1] - numberOfJobs
-        jobs = list(zip(h, L))
-        jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True))
-        otherFeatures = torch.tensor([W, P, N, 1])  # 1代表这个feature属于machine
+    def forward(self, Graph, h, L, W, P, N):
+        if isinstance(h, list):
+            jobs = list(zip(h, L))
+        elif isinstance(h, torch.Tensor):
+            jobs = list(zip(h.flatten().tolist(), L.flatten().tolist()))
+            W, P, N = W.item(), P.item(), N.item()
+        else:
+            raise TypeError("What is h???")
 
-        # jobFeatures形状为 n*6(h_i,L_i,W_i,P_i,n_i,1) 1代表这个feature属于machine
+        jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True)).to(device)
+        otherFeatures = torch.tensor([W, P, N, 1]).to(device)  # 1代表这个feature属于job
+
+
+        # jobFeatures形状为 n*6(h_i,L_i,W_i,P_i,n_i,1) 1代表这个feature属于job
         jobFeatures = torch.cat((jobList, otherFeatures.unsqueeze(1).t().expand(jobList.size(0), -1)), dim=1)
 
         # machineFeatures填充全为2，大小为numberOfMachines*6
-        machineFeatures = torch.ones((numberOfMachines, 6)) * 2
+        machineFeatures = (torch.ones((numberOfMachines, 6)) * 2).to(device)
 
         # terminalFeatures填充全为3，大小为1*6
-        terminalFeature = torch.ones((1, 6)) * 3
+        terminalFeature = (torch.ones((1, 6)) * 3).to(device)
 
         node_features = torch.cat((jobFeatures, machineFeatures, terminalFeature), dim=0)
 
 
         # 在Graph右侧增加一列0，代表terminal
-        add_terminal_tensor = torch.zeros(numberOfJobs, 1)
+        add_terminal_tensor = torch.zeros(numberOfJobs, 1).to(device)
         Graph_with_terminal = torch.cat((Graph, add_terminal_tensor), dim=1)
 
         # 下方把machine连terminal的位置填1，其余填0组成方阵
         numberOfJMT = Graph_with_terminal.shape[1]
-        tmp_tensor_left = torch.zeros((numberOfJMT - numberOfJobs, numberOfJMT - 1))
-        tmp_tensor_right = torch.ones((numberOfJMT - numberOfJobs, 1))
+        tmp_tensor_left = torch.zeros((numberOfJMT - numberOfJobs, numberOfJMT - 1)).to(device)
+        tmp_tensor_right = torch.ones((numberOfJMT - numberOfJobs, 1)).to(device)
         tmp_tensor_right[-1][-1] = 0
         add_zero_tensor = torch.cat((tmp_tensor_left, tmp_tensor_right), dim=1)
         Graph_edited = torch.cat((Graph_with_terminal, add_zero_tensor), dim=0)
 
-        dgl_Graph = tensor_to_dgl(Graph_edited)
+        dgl_Graph = tensor_to_dgl(Graph_edited).to(device)
 
 
         # job与job边的feature为T矩阵对应的时间，其余边的feature都为0
         numberOfEdges = dgl_Graph.num_edges()
-        time_matrix = build_time_matrix(jobList, numberOfJobs, W, P, N)[0]
-        small_Graph = Graph[:, :numberOfJobs]
-        indices = torch.nonzero(small_Graph == 1)
+        time_matrix = build_time_matrix(jobList, numberOfJobs, W, P, N)[0].to(device)
+        small_Graph = Graph[:, :numberOfJobs].to(device)
+        indices = torch.nonzero(small_Graph == 1).to(device)
         extracted_elements = time_matrix[indices[:, 0], indices[:, 1]]
         m_to_m_edge_features = extracted_elements.view(-1, 1)
-        other_edge_features = torch.zeros(numberOfEdges - m_to_m_edge_features.shape[0], 1)
+        other_edge_features = torch.zeros(numberOfEdges - m_to_m_edge_features.shape[0], 1).to(device)
         edge_features = torch.cat((m_to_m_edge_features, other_edge_features), dim=0)
 
-
-        fst_time_node_feats = self.conv1(dgl_Graph, node_features, edge_features)
+        zro_time_node_feats = self.conv0(dgl_Graph, node_features, edge_features)
+        fst_time_node_feats = self.conv1(dgl_Graph, zro_time_node_feats.mean(dim=1), edge_features)
         snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edge_features)
         trd_time_node_feats = self.conv3(dgl_Graph, snd_time_node_feats.mean(dim=1), edge_features)
+
+        reshaped_tensor = trd_time_node_feats[:-1, ].view(numberOfJobs+numberOfMachines, -1)
+
+        logit = 0.00001*(self.bilinear(reshaped_tensor, reshaped_tensor)/(16*3)).t()
+
+        Q = 0.01*logit - (1 - self.mask(Graph)) * 1e3
+        # print("Q", Q)
+        # prob = torch.softmax(Q.flatten(), 0)
+        value = torch.logsumexp(Q.flatten(), dim=-1).view((1, 1))
+        CD = Categorical(logits=(Q - (1 - self.mask(Graph)) * 1e10).flatten())
+
+        action = CD.sample().view(1)
+        log_prob = CD.log_prob(action).view(1)
+        entropy = CD.entropy().view(1)
+        # value = Q.flatten()[action].view((1, 1))
 
         feats = self.linear1(trd_time_node_feats).view(numberOfJMT, -1)
         feats = self.linear2(feats)
         feat = torch.max(feats, dim=0).values
 
-        return feat
+        """
+        values.shape = [1, 1]
+        actions.shape = [1]
+        log_prob.shape = [1]
+        entropy.shape = [1], 不过无所谓size，因为ppo中直接mean的，entropy是None都行
+        """
+
+        return value, action, log_prob, entropy
 
 
     def mask(self, Graph: torch.tensor):
-        left = torch.ones((Graph.size()[0], Graph.size()[0]))
-        right = torch.ones((Graph.size()[0], Graph.size()[1] - Graph.size()[0]))
+        left = torch.ones((Graph.size()[0], Graph.size()[0])).to(device)
+        right = torch.ones((Graph.size()[0], Graph.size()[1] - Graph.size()[0])).to(device)
         row = torch.sum(Graph, dim=1, keepdim=True)
         col = torch.sum(Graph, dim=0, keepdim=True)
 
@@ -126,10 +165,13 @@ class GraphNN(nn.Module):
 
 if __name__ == "__main__":
     dd = GraphNN()
+    obs = {'Graph': torch.tensor([[0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.],
+                                        [0., 0., 0., 0., 0., 0.]], device='cuda:0'), 'h': torch.tensor([9.4304e-12, 7.3497e-12, 7.3497e-12, 7.3497e-12], device='cuda:0'), 'L': torch.tensor([506, 427, 500, 450], device='cuda:0'), 'W': torch.tensor([90000.], device='cuda:0'), 'P': torch.tensor([0.1000], device='cuda:0'), 'N': torch.tensor([3.5830e-16], device='cuda:0')}
 
-    ret = dd.forward(torch.tensor([[0, 1, 0, 0, 0, 0],
-                                   [0, 0, 0, 0, 1, 0],
-                                   [0, 0, 0, 0, 0, 0],
-                                   [0, 0, 0, 0, 0, 1]]), [1, 2, 3, 4], [5, 4, 3, 2], 10, 15, 20)
+    ret = dd.forward(obs['Graph'], obs['h'], obs['L'], obs['W'], obs['P'], obs['N'])
+
+    print(dd.mask(obs['Graph']))
 
     print(ret)

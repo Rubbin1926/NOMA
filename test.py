@@ -1,9 +1,8 @@
-from env_batch import NOMAenv
-from GNN import GraphNN
+from env import NOMAenv
 import time
 start_time = time.time()
 
-env = NOMAenv(batch_size=64)
+env = NOMAenv()
 observation, info = env.reset(seed=42)
 
 for i in range(500):
