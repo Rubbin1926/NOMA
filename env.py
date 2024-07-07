@@ -115,7 +115,7 @@ class NOMAenv(gym.Env):
         reward = self.reward(self.G)
         mask = self.mask(self.G)
         is_done = self.is_done()
-        return (self.get_obs(), reward * (not is_done), is_done, False, {"action_mask": mask})
+        return (self.get_obs(), reward * is_done, is_done, False, {"action_mask": mask})
 
 
     def mask(self, Graph: torch.tensor):
@@ -188,6 +188,7 @@ if __name__ == "__main__":
     for _ in range(20):
         action = env.sample()
         observation, reward, done, _, info = env.step(action)
+        print("reward:", env.reward(env.G))
         print(f"""observation = {observation}""")
         print(f"""reward = {reward}""")
         print(f"""done = {done}""")
