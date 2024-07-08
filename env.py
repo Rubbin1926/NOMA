@@ -39,7 +39,7 @@ def sample_env():
         _h = 1 / tmp1
         return _h
 
-    h = torch.tensor([h_distribution() for _ in range(numberOfJobs)])
+    h, _ = torch.sort(torch.tensor([h_distribution() for _ in range(numberOfJobs)]), descending=True)
     L = torch.tensor(np.random.randint(1, 1024, size=(numberOfJobs, )).tolist())
     W = torch.tensor(180 / numberOfMachines * 1000)
     P = torch.tensor(0.1)
@@ -99,8 +99,7 @@ class NOMAenv(gym.Env):
     ):
         super().reset(seed=seed)
         self.h, self.L, self.numberOfJobs, self.numberOfMachines, self.W, self.P, self.n = sample_env()
-        jobs = list(zip(self.h.flatten().tolist(), self.L.flatten().tolist()))
-        self.jobList = torch.tensor(sorted(jobs, key=lambda x: x[0], reverse=True))
+        self.jobList = torch.stack([self.h.view(-1), self.L.view(-1)], dim=-1)
 
         self.G = torch.zeros((self.numberOfJobs, self.numberOfJobs + self.numberOfMachines))
         self.T = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[0]
