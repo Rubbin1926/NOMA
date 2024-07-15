@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 import random
 import math
+import copy
 
 from tensordict.tensordict import TensorDict
 from torchrl.data import (
@@ -12,6 +13,7 @@ from torchrl.data import (
     UnboundedContinuousTensorSpec,
     UnboundedDiscreteTensorSpec,
 )
+from rl4co.utils.decoding import rollout, random_policy
 from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.common.utils import Generator, get_sampler
 
@@ -42,6 +44,11 @@ def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def mask(Graph: torch.Tensor) -> torch.Tensor:
+    """
+    Return the mask of the graph
+    输入的Graph是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+    输出的mask是一个batch_size * (numberOfJobs * (numberOfJobs + numberOfMachines))的二维张量
+    """
     batch_size = Graph.shape[0]
     graph_shape = Graph.shape[1:]
 
@@ -56,7 +63,9 @@ def mask(Graph: torch.Tensor) -> torch.Tensor:
     left = left.triu(diagonal=1)
     right -= row
 
-    return torch.cat((left, right), dim=2).bool()
+    ret = torch.cat((left, right), dim=2).bool().reshape(batch_size, -1)
+
+    return ret
 
 
 def sample_env(batch_size: list) -> tuple:
@@ -76,13 +85,11 @@ def sample_env(batch_size: list) -> tuple:
     return h, L, W, P, N
 
 
-def action_to_tensor(numpyAction) -> torch.Tensor:
-    if isinstance(numpyAction, torch.Tensor):
-        return numpyAction
-    rowPosition = numpyAction // (numberOfJobs+numberOfMachines)
-    colPosition = numpyAction % (numberOfJobs+numberOfMachines)
-    actionTensor = torch.zeros((numberOfJobs, numberOfJobs+numberOfMachines))
-    actionTensor[rowPosition][colPosition] = 1
+def action_to_tensor(Action: torch.Tensor) -> torch.Tensor:
+    rowPosition = Action // (numberOfJobs + numberOfMachines)
+    colPosition = Action % (numberOfJobs + numberOfMachines)
+    actionTensor = torch.zeros((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
+    actionTensor[torch.arange(Action.size(0)), rowPosition, colPosition] = 1
     return actionTensor
 
 
@@ -113,7 +120,6 @@ class NOMAGenerator(Generator):
         )
 
 
-
 class NOMAenv(RL4COEnvBase):
     """NOMA environment"""
 
@@ -134,15 +140,15 @@ class NOMAenv(RL4COEnvBase):
         self._make_spec(self.generator)
 
     def _step(self, td: TensorDict) -> TensorDict:
-        print("###Step###")
+        print("__________###Step###__________")
 
         action = td["action"]
         Graph = td["Graph"]
 
-        Graph += mask(Graph) * action_to_tensor(action)
+        Graph += (mask(Graph).reshape_as(Graph)) * action_to_tensor(action)
         available = mask(Graph)
 
-        done = torch.sum(available, dim=(-2, -1)) == 0
+        done = torch.sum(available, dim=(-1)) == 0
 
         # The reward is calculated outside via get_reward for efficiency, so we set it to 0 here
         reward = torch.zeros_like(done) * done
@@ -232,10 +238,27 @@ class NOMAenv(RL4COEnvBase):
         self.done_spec = UnboundedDiscreteTensorSpec(shape=(1), dtype=torch.bool)
 
     def _get_reward(self, td: TensorDict, actions: torch.Tensor) -> torch.Tensor:
-        pass
+        
+        action = td["action"]
+        Graph = td["Graph"]
 
-        # TodoList:
-        # 写这个函数
+
+        Graph += (mask(Graph).reshape_as(Graph)) * action_to_tensor(action)
+        available = mask(Graph)
+
+        done = torch.sum(available, dim=(-1)) == 0
+
+        copied_td = copy.deepcopy(td)
+        copied_td.update(
+            {
+                "Graph": Graph,
+                "action_mask": available,
+                "done": done,
+            },
+        )
+
+        reward = self.calculate_time_dummy(copied_td)
+        return reward
 
     def get_action_mask(self, td: TensorDict) -> TensorDict:
         Graph = td["Graph"]
@@ -270,7 +293,8 @@ class NOMAenv(RL4COEnvBase):
         return ret
 
 
-
 if __name__ == "__main__":
-    aa = NOMAenv()
-    print(aa.calculate_time_dummy(td=aa.reset(batch_size=BATCH_SIZE)))
+    env = NOMAenv()
+    # env.reset(batch_size=[BATCH_SIZE])
+    reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), random_policy)
+    
