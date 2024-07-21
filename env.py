@@ -150,17 +150,23 @@ class NOMAenv(RL4COEnvBase):
 
         done = torch.sum(available, dim=(-1)) == 0
 
-        # The reward is calculated outside via get_reward for efficiency, so we set it to 0 here
-        reward = torch.zeros_like(done) * done
-
         td.update(
             {
                 "Graph": Graph,
                 "action_mask": available,
-                "reward": reward,
                 "done": done,
             },
         )
+
+        # The reward is calculated outside via get_reward for efficiency, so we set it to 0 here
+        # reward = torch.zeros_like(done) * done
+        reward = -self.calculate_time_dummy(td)
+        td.update(
+            {
+                "reward": reward,
+            },
+        )
+
         return td
 
     def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
@@ -238,27 +244,10 @@ class NOMAenv(RL4COEnvBase):
         self.done_spec = UnboundedDiscreteTensorSpec(shape=(1), dtype=torch.bool)
 
     def _get_reward(self, td: TensorDict, actions: torch.Tensor) -> torch.Tensor:
-        
-        action = td["action"]
-        Graph = td["Graph"]
+        print("###get_reward###")
+        # 在一段trajectory结束后，才会调用
 
-
-        Graph += (mask(Graph).reshape_as(Graph)) * action_to_tensor(action)
-        available = mask(Graph)
-
-        done = torch.sum(available, dim=(-1)) == 0
-
-        copied_td = copy.deepcopy(td)
-        copied_td.update(
-            {
-                "Graph": Graph,
-                "action_mask": available,
-                "done": done,
-            },
-        )
-
-        reward = self.calculate_time_dummy(copied_td)
-        return reward
+        return -self.calculate_time_dummy(td)
 
     def get_action_mask(self, td: TensorDict) -> TensorDict:
         Graph = td["Graph"]
@@ -292,9 +281,19 @@ class NOMAenv(RL4COEnvBase):
         ret, _ = torch.max(torch.stack((totalTime_dummy, self.calculate_time_nodummy(td))), dim=0)
         return ret
 
-
+from rl4co.models import AttentionModelPolicy, POMO
+from rl4co.utils import RL4COTrainer
 if __name__ == "__main__":
     env = NOMAenv()
-    # env.reset(batch_size=[BATCH_SIZE])
+    env.reset(batch_size=[BATCH_SIZE])
     reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), random_policy)
-    
+    print(reward)
+    print(td)
+    print(actions)
+    # Create policy and RL model
+    # policy = AttentionModelPolicy(env_name=env.name, num_encoder_layers=6)
+    # model = POMO(env, policy, batch_size=64, optimizer_kwargs={"lr": 1e-4})
+    #
+    # # Instantiate Trainer and fit
+    # trainer = RL4COTrainer(max_epochs=10, accelerator="cpu", precision="16-mixed")
+    # trainer.fit(model)
