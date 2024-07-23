@@ -1,37 +1,75 @@
-import torch
-import math
 from typing import Optional
-import random
+import torch
+import torch.nn as nn
 import numpy as np
-import sys
-import gymnasium as gym
-from gymnasium import spaces
+import random
+import math
+
+from tensordict.tensordict import TensorDict
+from torchrl.data import (
+    BoundedTensorSpec,
+    CompositeSpec,
+    UnboundedContinuousTensorSpec,
+    UnboundedDiscreteTensorSpec,
+)
+from rl4co.utils.decoding import rollout, random_policy
+from rl4co.envs.common.base import RL4COEnvBase
+from rl4co.envs.common.utils import Generator, get_sampler
 
 
 numberOfJobs = 4
 numberOfMachines = 2
+BATCH_SIZE = 2
 
 
-def build_time_matrix(jobList, numberOfJobs, W, P, n):
+def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
     """构建Time矩阵，下半部分全为0"""
-    time_matrix = torch.zeros((numberOfJobs, numberOfJobs))
-    time_list = torch.zeros((1, numberOfJobs))
+    batch_size = jobList.shape[0]
+    time_matrix = torch.zeros((batch_size, numberOfJobs, numberOfJobs))
+    time_list = torch.zeros((batch_size, 1, numberOfJobs))
 
-    for j in range(numberOfJobs):
-        R_OMA = W * math.log(1 + jobList[j][0] * P / n)
-        time_OMA = jobList[j][1] / R_OMA
-        time_matrix[j, j] = time_OMA
-        time_list[0, j] = time_OMA
-        for k in range(j + 1, numberOfJobs):
-            R_NOMA = W * math.log(1 + jobList[j][0] * P / (jobList[k][0] * P + n))
-            time_NOMA = jobList[k][1] / R_NOMA
-            time_matrix[j, k] = max(time_NOMA, time_OMA)
+    for i in range(batch_size):
+        for j in range(numberOfJobs):
+            R_OMA = W[i] * math.log(1 + jobList[i, j, 0] * P[i] / N[i])
+            time_OMA = jobList[i, j, 1] / R_OMA
+            time_matrix[i, j, j] = time_OMA
+            time_list[i, 0, j] = time_OMA
+            for k in range(j + 1, numberOfJobs):
+                R_NOMA = W[i] * math.log(1 + jobList[i, j, 0] * P[i] / (jobList[i, k, 0] * P[i] + N[i]))
+                time_NOMA = jobList[i, k, 1] / R_NOMA
+                time_matrix[i, j, k] = max(time_NOMA, time_OMA)
 
     return time_matrix, time_list
 
 
-def sample_env():
-    # Parameters in paper
+def mask(Graph: torch.Tensor) -> torch.Tensor:
+    """
+    Return the mask of the graph
+    输入的Graph是一个batch_size * (numberOfJobs * (numberOfJobs + numberOfMachines))的二维张量
+    输出的mask是一个batch_size * (numberOfJobs * (numberOfJobs + numberOfMachines))的二维张量
+    """
+    Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+    batch_size = Graph.shape[0]
+    graph_shape = Graph.shape[1:]
+
+    left = torch.ones((batch_size, graph_shape[0], graph_shape[0])).to(Graph.device)
+    right = torch.ones((batch_size, graph_shape[0], graph_shape[1] - graph_shape[0])).to(Graph.device)
+
+    row = torch.sum(Graph, dim=2, keepdim=True)
+    col = torch.sum(Graph, dim=1, keepdim=True)
+
+    left = left - row - torch.transpose(row, 1, 2) - col[:, :, 0:graph_shape[0]] - torch.transpose(col[:, :, 0:graph_shape[0]], 1, 2)
+    left = torch.where(left == 1, torch.tensor(1).float(), torch.tensor(0).float())
+    left = left.triu(diagonal=1)
+    right -= row
+
+    ret = torch.cat((left, right), dim=2).bool().reshape(batch_size, -1)
+
+    return ret
+
+
+def sample_env(batch_size: list) -> tuple:
+    batch_size = batch_size[0] if isinstance(batch_size, list) else batch_size
     def h_distribution():
         d = random.uniform(0.1, 0.5)
         tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
@@ -39,159 +77,223 @@ def sample_env():
         _h = 1 / tmp1
         return _h
 
-    h, _ = torch.sort(torch.tensor([h_distribution() for _ in range(numberOfJobs)]), descending=True)
-    L = torch.tensor(np.random.randint(1, 1024, size=(numberOfJobs, )).tolist())
-    W = torch.tensor(180 / numberOfMachines * 1000)
-    P = torch.tensor(0.1)
-    n = torch.tensor((10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000))
-    return (h, L, numberOfJobs, numberOfMachines, W, P, n)
+    h = torch.tensor([sorted([h_distribution() for _ in range(numberOfJobs)], reverse=True) for _ in range(batch_size)])
+    L = torch.tensor(np.random.randint(1, 1024, size=(batch_size, numberOfJobs)).tolist())
+    W = torch.tensor([[180 / numberOfMachines * 1000] for _ in range(batch_size)])
+    P = torch.tensor([[0.1] for _ in range(batch_size)])
+    N = torch.tensor([[(10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)] for _ in range(batch_size)])
+    return h, L, W, P, N
 
 
-class NOMAenv(gym.Env):
+def action_to_tensor(Action: torch.Tensor) -> torch.Tensor:
+    # rowPosition = Action // (numberOfJobs + numberOfMachines)
+    # colPosition = Action % (numberOfJobs + numberOfMachines)
+    # actionTensor = torch.zeros((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
+    # actionTensor[torch.arange(Action.size(0)), rowPosition, colPosition] = 1
+    actionTensor = torch.zeros((Action.size(0), numberOfJobs*(numberOfJobs + numberOfMachines))).to(Action.device)
+    actionTensor[torch.arange(Action.size(0)), Action] = 1
+    return actionTensor
+
+
+class NOMAGenerator(Generator):
     def __init__(self):
-        self.observation_space = spaces.Dict(
+        pass
+        # print("###Generator###")
+
+    def _generate(self, batch_size) -> TensorDict:
+        h, L, W, P, N = sample_env(batch_size=batch_size)
+        bs = batch_size[0] if isinstance(batch_size, list) else batch_size
+        Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
+        jobList = torch.stack((h, L), dim=-1)
+        T, T_list = build_time_matrix(jobList, W, P, N)
+
+        return TensorDict(
             {
-                "Graph": spaces.Box(0, 1, shape=(numberOfJobs, numberOfJobs+numberOfMachines), dtype=np.int32),
-                "h": spaces.Box(2e-12, 9e-10, shape=(numberOfJobs,), dtype=np.float32),
-                "L": spaces.Box(1, 1024, shape=(numberOfJobs,), dtype=np.float32),
-                "W": spaces.Box(0, 0.18, dtype=np.float32),
-                "P": spaces.Box(0.1, 0.1, dtype=np.float32),
-                "N": spaces.Box(0, 8e-16, dtype=np.float32),
-            }
+                "Graph": Graph,
+                "h": h,
+                "L": L,
+                "W": W,
+                "P": P,
+                "N": N,
+                "jobList": jobList,
+                "T": T,
+                "T_list": T_list,
+            },
+            batch_size=batch_size,
         )
 
-        self.action_space = spaces.Discrete((numberOfJobs+numberOfMachines)*numberOfJobs)
 
+class NOMAenv(RL4COEnvBase):
+    """NOMA environment"""
 
-    def action_to_tensor(self, numpyAction):
-        if isinstance(numpyAction, torch.Tensor):
-            return numpyAction
-        rowPosition = numpyAction // (numberOfJobs+numberOfMachines)
-        colPosition = numpyAction % (numberOfJobs+numberOfMachines)
-        actionTensor = torch.zeros((numberOfJobs, numberOfJobs+numberOfMachines))
-        actionTensor[rowPosition][colPosition] = 1
-        return actionTensor
+    name = "NOMA"
 
+    def __init__(
+        self,
+        generator: NOMAGenerator = None,
+        generator_params: dict = {},
+        check_solution=False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if generator is None:
+            generator = NOMAGenerator(**generator_params)
+        self.generator = generator
+        self.check_solution = check_solution
+        self._make_spec(self.generator)
 
-    def calculate_time_nodummy(self, Graph):
-        G_tmp = Graph[:, 0:self.numberOfJobs]
-        row = torch.sum(G_tmp, dim=1)
-        col = torch.sum(G_tmp, dim=0)
+    def _step(self, td: TensorDict) -> TensorDict:
+        # print("__________###Step###__________")
 
-        totalTime_OMA_fake = (1 - row - col) * self.T_list
-        totalTime_NOMA_fake = torch.sum(G_tmp * self.T, dim=0)
+        action = td["action"]
+        Graph = td["Graph"]
+
+        Graph += (mask(Graph)) * action_to_tensor(action)
+        available = mask(Graph)
+        done = torch.sum(available, dim=(-1)) == 0
+
+        td.update(
+            {
+                "Graph": Graph,
+                "action_mask": available,
+                "done": done,
+            },
+        )
+
+        # The reward is calculated outside via get_reward for efficiency, so we set it to 0 here
+        # reward = torch.zeros_like(done) * done
+        reward = -self.calculate_time_dummy(td)
+        td.update(
+            {
+                "reward": reward,
+            },
+        )
+
+        return td
+
+    def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
+        # print("###Reset###")
+
+        init_Graph = td["Graph"] if td is not None else None
+        # if batch_size is None:
+        #     batch_size = self.batch_size if init_Graph is None else BATCH_SIZE
+        device = init_Graph.device if init_Graph is not None else self.device
+        self.to(device)
+        # if init_Graph is None:
+        #     bs = batch_size[0] if isinstance(batch_size, list) else batch_size
+        #     init_Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
+        batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+
+        # Other variables
+        h = td["h"]
+        L = td["L"]
+        W = td["W"]
+        P = td["P"]
+        N = td["N"]
+        jobList = td["jobList"]
+
+        return TensorDict(
+            {
+                "Graph": init_Graph,
+                "h": h,
+                "L": L,
+                "W": W,
+                "P": P,
+                "N": N,
+                "action_mask": mask(init_Graph),
+                "jobList": jobList,
+            },
+            batch_size=batch_size,
+        )
+
+    def _make_spec(self, generator: NOMAGenerator):
+        self.observation_spec = CompositeSpec(
+            Graph=BoundedTensorSpec(
+                low=0,
+                high=1,
+                shape=(numberOfJobs*(numberOfJobs + numberOfMachines)),
+                dtype=torch.int64,
+            ),
+            h=UnboundedContinuousTensorSpec(
+                shape=(numberOfJobs),
+                dtype=torch.float32,
+            ),
+            L=UnboundedDiscreteTensorSpec(
+                shape=(numberOfJobs),
+                dtype=torch.float32,
+            ),
+            W=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            P=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            N=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            shape=(),
+        )
+        self.action_spec = BoundedTensorSpec(
+            low=0,
+            high=1,
+            shape=(1,),
+            dtype=torch.int64,
+        )
+        self.reward_spec = UnboundedContinuousTensorSpec(shape=(1))
+        self.done_spec = UnboundedDiscreteTensorSpec(shape=(1), dtype=torch.bool)
+
+    def _get_reward(self, td: TensorDict, actions: torch.Tensor) -> torch.Tensor:
+        # print("###get_reward###")
+        # 在一段trajectory结束后，才会调用
+        # print("reward", -self.calculate_time_dummy(td))
+
+        return -self.calculate_time_dummy(td)
+
+    def get_action_mask(self, td: TensorDict) -> TensorDict:
+        Graph = td["Graph"]
+        action_mask = mask(Graph)
+        td.update(
+            {
+                "action_mask": action_mask,
+            },
+        )
+        return td
+
+    def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
+        Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
+        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+
+        G_tmp = Graph[:, :, 0:numberOfJobs]
+        row = torch.sum(G_tmp, dim=-1)
+        col = torch.sum(G_tmp, dim=-2)
+
+        totalTime_OMA_fake = (1 - row - col).unsqueeze(dim=-2) * T_list
+        totalTime_NOMA_fake = torch.sum(G_tmp * T, dim=-2).unsqueeze(dim=-2)
         totalTime_fake = totalTime_OMA_fake + totalTime_NOMA_fake
 
-        return torch.max(totalTime_fake @ (Graph[:, self.numberOfJobs: Graph.size()[1]]))
+        ret, _ = torch.max(totalTime_fake @ (Graph[:, :, numberOfJobs: (numberOfJobs + numberOfMachines)]), dim=-1)
 
+        return ret.flatten()
 
-    def calculate_time_dummy(self, Graph):
-        row = torch.sum(Graph, dim=1)
-        totalTime_dummy = torch.sum((1 - row) * self.T_list)
-        return torch.max(totalTime_dummy, self.calculate_time_nodummy(Graph))
+    def calculate_time_dummy(self, td: TensorDict) -> torch.Tensor:
+        Graph, T_list = td["Graph"], td["T_list"]
+        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
 
+        row = torch.sum(Graph, dim=-1).reshape_as(T_list)
+        totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
 
-    def reset(
-        self,
-        *,
-        seed: Optional[int] = None,
-        options: Optional[dict] = None,
-    ):
-        super().reset(seed=seed)
-        self.h, self.L, self.numberOfJobs, self.numberOfMachines, self.W, self.P, self.n = sample_env()
-        self.jobList = torch.stack([self.h.view(-1), self.L.view(-1)], dim=-1)
+        ret, _ = torch.max(torch.stack((totalTime_dummy, self.calculate_time_nodummy(td))), dim=0)
+        return ret
 
-        self.G = torch.zeros((self.numberOfJobs, self.numberOfJobs + self.numberOfMachines))
-        self.T = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[0]
-        self.T_list = build_time_matrix(self.jobList, self.numberOfJobs, self.W, self.P, self.n)[1]
-
-        return (self.get_obs(), self.get_info())
-
-
-    def step(self, Action):
-        Action = self.action_to_tensor(Action)
-        self.G += self.mask(self.G) * Action
-        reward = self.reward(self.G)
-        mask = self.mask(self.G)
-        is_done = self.is_done()
-        return (self.get_obs(), reward * is_done, is_done, False, {"action_mask": mask})
-
-
-    def mask(self, Graph: torch.tensor):
-        left = torch.ones((Graph.size()[0], Graph.size()[0]))
-        right = torch.ones((Graph.size()[0], Graph.size()[1] - Graph.size()[0]))
-        row = torch.sum(Graph, dim=1, keepdim=True)
-        col = torch.sum(Graph, dim=0, keepdim=True)
-
-        left = left - row - torch.t(row) - col[:, 0:Graph.size()[0]] - torch.t(col[:, 0:Graph.size()[0]])
-        left = torch.where(left == 1, torch.tensor(1).float(), torch.tensor(0).float())
-        left = left.triu(diagonal=1)
-        right -= row
-
-        return torch.cat((left, right), dim=1)
-
-
-    def sample(self):
-        mask = self.mask(self.G)
-        indices = torch.nonzero(mask)
-
-        if indices.numel() > 0:
-            selected_index = random.choice(indices)
-            index = selected_index[0] * mask.shape[1] + selected_index[1]
-        else:
-            raise ValueError("No available action")
-
-        # sampleMatrix = torch.zeros_like(mask)
-        # if indices.numel() > 0:
-        #     selected_index = random.choice(indices)
-        #     sampleMatrix[selected_index[0], selected_index[1]] = 1
-
-        return index.clone().numpy()
-
-
-    def get_obs(self):
-        return {
-                "Graph": self.G,
-                "h": self.h,
-                "L": self.L,
-                "W": self.W,
-                "P": self.P,
-                "N": self.n
-        }
-
-    def get_info(self):
-        return {
-            "action_mask": self.mask(self.G)
-        }
-
-
-    def get_parameters(self):
-        return (self.h, self.L, self.W, self.P, self.n)
-
-
-    def reward(self, Graph):
-        return -self.calculate_time_dummy(Graph)
-
-
-    def is_done(self):
-        return torch.sum(self.mask(self.G)) == 0
-
-
-    def close(self):
-        sys.exit()
-
-
+from rl4co.models import AttentionModelPolicy, POMO
+from rl4co.utils import RL4COTrainer
 if __name__ == "__main__":
     env = NOMAenv()
-    env.reset(seed=42)
-    for _ in range(20):
-        action = env.sample()
-        observation, reward, done, _, info = env.step(action)
-        print("reward:", env.reward(env.G))
-        print(f"""observation = {observation}""")
-        print(f"""reward = {reward}""")
-        print(f"""done = {done}""")
-        print(f"""info = {info}""")
-        print("_____________________________")
-        if done:
-            env.reset()
+    env.reset(batch_size=[BATCH_SIZE])
+    reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), random_policy)
+    print(reward)
+    print(td)
+    print(actions)
