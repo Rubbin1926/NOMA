@@ -4,7 +4,6 @@ import torch.nn as nn
 import numpy as np
 import random
 import math
-import copy
 
 from tensordict.tensordict import TensorDict
 from torchrl.data import (
@@ -46,14 +45,15 @@ def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
 def mask(Graph: torch.Tensor) -> torch.Tensor:
     """
     Return the mask of the graph
-    输入的Graph是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+    输入的Graph是一个batch_size * (numberOfJobs * (numberOfJobs + numberOfMachines))的二维张量
     输出的mask是一个batch_size * (numberOfJobs * (numberOfJobs + numberOfMachines))的二维张量
     """
+    Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
     batch_size = Graph.shape[0]
     graph_shape = Graph.shape[1:]
 
-    left = torch.ones((batch_size, graph_shape[0], graph_shape[0]))
-    right = torch.ones((batch_size, graph_shape[0], graph_shape[1] - graph_shape[0]))
+    left = torch.ones((batch_size, graph_shape[0], graph_shape[0])).to(Graph.device)
+    right = torch.ones((batch_size, graph_shape[0], graph_shape[1] - graph_shape[0])).to(Graph.device)
 
     row = torch.sum(Graph, dim=2, keepdim=True)
     col = torch.sum(Graph, dim=1, keepdim=True)
@@ -86,21 +86,24 @@ def sample_env(batch_size: list) -> tuple:
 
 
 def action_to_tensor(Action: torch.Tensor) -> torch.Tensor:
-    rowPosition = Action // (numberOfJobs + numberOfMachines)
-    colPosition = Action % (numberOfJobs + numberOfMachines)
-    actionTensor = torch.zeros((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
-    actionTensor[torch.arange(Action.size(0)), rowPosition, colPosition] = 1
+    # rowPosition = Action // (numberOfJobs + numberOfMachines)
+    # colPosition = Action % (numberOfJobs + numberOfMachines)
+    # actionTensor = torch.zeros((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
+    # actionTensor[torch.arange(Action.size(0)), rowPosition, colPosition] = 1
+    actionTensor = torch.zeros((Action.size(0), numberOfJobs*(numberOfJobs + numberOfMachines))).to(Action.device)
+    actionTensor[torch.arange(Action.size(0)), Action] = 1
     return actionTensor
 
 
 class NOMAGenerator(Generator):
     def __init__(self):
-        print("###Generator###")
+        pass
+        # print("###Generator###")
 
     def _generate(self, batch_size) -> TensorDict:
         h, L, W, P, N = sample_env(batch_size=batch_size)
         bs = batch_size[0] if isinstance(batch_size, list) else batch_size
-        Graph = torch.zeros((bs, numberOfJobs, numberOfJobs + numberOfMachines))
+        Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
         jobList = torch.stack((h, L), dim=-1)
         T, T_list = build_time_matrix(jobList, W, P, N)
 
@@ -140,14 +143,13 @@ class NOMAenv(RL4COEnvBase):
         self._make_spec(self.generator)
 
     def _step(self, td: TensorDict) -> TensorDict:
-        print("__________###Step###__________")
+        # print("__________###Step###__________")
 
         action = td["action"]
         Graph = td["Graph"]
 
-        Graph += (mask(Graph).reshape_as(Graph)) * action_to_tensor(action)
+        Graph += (mask(Graph)) * action_to_tensor(action)
         available = mask(Graph)
-
         done = torch.sum(available, dim=(-1)) == 0
 
         td.update(
@@ -170,16 +172,16 @@ class NOMAenv(RL4COEnvBase):
         return td
 
     def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
-        print("###Reset###")
+        # print("###Reset###")
 
         init_Graph = td["Graph"] if td is not None else None
-        if batch_size is None:
-            batch_size = self.batch_size if init_Graph is None else BATCH_SIZE
+        # if batch_size is None:
+        #     batch_size = self.batch_size if init_Graph is None else BATCH_SIZE
         device = init_Graph.device if init_Graph is not None else self.device
         self.to(device)
-        if init_Graph is None:
-            bs = batch_size[0] if isinstance(batch_size, list) else batch_size
-            init_Graph = torch.zeros((bs, numberOfJobs, numberOfJobs + numberOfMachines))
+        # if init_Graph is None:
+        #     bs = batch_size[0] if isinstance(batch_size, list) else batch_size
+        #     init_Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
 
         # Other variables
@@ -209,7 +211,7 @@ class NOMAenv(RL4COEnvBase):
             Graph=BoundedTensorSpec(
                 low=0,
                 high=1,
-                shape=(numberOfJobs, numberOfJobs + numberOfMachines),
+                shape=(numberOfJobs*(numberOfJobs + numberOfMachines)),
                 dtype=torch.int64,
             ),
             h=UnboundedContinuousTensorSpec(
@@ -237,15 +239,16 @@ class NOMAenv(RL4COEnvBase):
         self.action_spec = BoundedTensorSpec(
             low=0,
             high=1,
-            shape=(numberOfJobs, numberOfJobs + numberOfMachines),
+            shape=(1,),
             dtype=torch.int64,
         )
         self.reward_spec = UnboundedContinuousTensorSpec(shape=(1))
         self.done_spec = UnboundedDiscreteTensorSpec(shape=(1), dtype=torch.bool)
 
     def _get_reward(self, td: TensorDict, actions: torch.Tensor) -> torch.Tensor:
-        print("###get_reward###")
+        # print("###get_reward###")
         # 在一段trajectory结束后，才会调用
+        # print("reward", -self.calculate_time_dummy(td))
 
         return -self.calculate_time_dummy(td)
 
@@ -261,6 +264,8 @@ class NOMAenv(RL4COEnvBase):
 
     def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
+        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+
         G_tmp = Graph[:, :, 0:numberOfJobs]
         row = torch.sum(G_tmp, dim=-1)
         col = torch.sum(G_tmp, dim=-2)
@@ -275,6 +280,8 @@ class NOMAenv(RL4COEnvBase):
 
     def calculate_time_dummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T_list = td["Graph"], td["T_list"]
+        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+
         row = torch.sum(Graph, dim=-1).reshape_as(T_list)
         totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
 
@@ -290,10 +297,3 @@ if __name__ == "__main__":
     print(reward)
     print(td)
     print(actions)
-    # Create policy and RL model
-    # policy = AttentionModelPolicy(env_name=env.name, num_encoder_layers=6)
-    # model = POMO(env, policy, batch_size=64, optimizer_kwargs={"lr": 1e-4})
-    #
-    # # Instantiate Trainer and fit
-    # trainer = RL4COTrainer(max_epochs=10, accelerator="cpu", precision="16-mixed")
-    # trainer.fit(model)
