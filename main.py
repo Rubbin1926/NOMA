@@ -19,13 +19,13 @@ policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed s
                               dynamic_embedding=NOMADynamicEmbedding(emb_dim)
 )
 
-model = AttentionModel(env,
-                       policy=policy,
-                       baseline='rollout',
-                       train_data_size=128,
-                       val_data_size=128)
+# model = AttentionModel(env,
+#                        policy=policy,
+#                        baseline='rollout',
+#                        train_data_size=128,
+#                        val_data_size=128)
 
-# model = PPO(env, policy=policy, train_data_size=100, val_data_size=100)
+model = PPO(env, policy=policy, train_data_size=64, val_data_size=64, critic_kwargs={"embed_dim": emb_dim})
 
 # Greedy rollouts over untrained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
