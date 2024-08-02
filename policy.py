@@ -50,16 +50,17 @@ def tensor_to_dgl(Graph: torch.Tensor) -> dgl.DGLGraph:  # 输入进来的tensor
 
 # All For Test
 class NOMAInitEmbedding(nn.Module):
-    def __init__(self, embed_dim, linear_bias=True):
+    def __init__(self, embed_dim, linear_bias=True, numberOfJobs=numberOfJobs):
         print("###NOMAInitEmbedding###")
         super(NOMAInitEmbedding, self).__init__()
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=12, nhead=3, dim_feedforward=512, dropout=0,
+        d_model = 2 * numberOfJobs + 4
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=2, dim_feedforward=512, dropout=0,
                                                    batch_first=True)
         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
-        self.encoder = nn.Sequential(nn.LayerNorm(12),
+        self.encoder = nn.Sequential(nn.LayerNorm(d_model),
                                      transformer_encoder,
-                                     nn.Linear(12, embed_dim, linear_bias),
+                                     nn.Linear(d_model, embed_dim, linear_bias),
                                      nn.LayerNorm(embed_dim),
                                      nn.ReLU()).to(device)
 
