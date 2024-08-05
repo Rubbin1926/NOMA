@@ -6,6 +6,7 @@ import math
 from dgl.nn import EdgeGATConv
 from torch.distributions import Categorical
 from env import numberOfJobs, numberOfMachines, BATCH_SIZE
+from tensordict.tensordict import TensorDict
 
 """
 TensorDict(
@@ -33,19 +34,97 @@ TensorDict(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _tensor_to_dgl(Graph: torch.Tensor) -> dgl.DGLGraph:  # 输入进来的tensor with batch是处理成方阵的Graph
+    """
+    用了dgl自带的batch函数
+
+    经测试，与下文函数的结果经过dgl.nn后结果一致，并且此函数for循环导致速度更慢
+    """
+    graph_list = []
+    num_nodes = numberOfJobs+numberOfMachines
+    for i in range(Graph.shape[0]):
+        DGLgraph = dgl.DGLGraph()
+        DGLgraph.add_nodes(num_nodes)
+        indices = torch.nonzero(Graph[i]).t().view(2, -1)
+        DGLgraph.add_edges(indices[0], indices[1])
+        graph_list.append(DGLgraph)
+
+    return dgl.batch(graph_list)
+
+
 def tensor_to_dgl(Graph: torch.Tensor) -> dgl.DGLGraph:  # 输入进来的tensor with batch是处理成方阵的Graph
-    DGLgraph = dgl.DGLGraph()
     num_nodes = Graph.shape[0] * (numberOfJobs+numberOfMachines)
-    DGLgraph.add_nodes(num_nodes)
 
     # 处理为dgl接受的格式
     indices = torch.nonzero(Graph)
     indices += (indices[:, 0] * (numberOfJobs+numberOfMachines)).reshape(indices.shape[0], 1)
-    indices = indices[:, 1:].t().contiguous().view(2, -1)
+    indices = indices[:, 1:].t().view(2, -1)
 
-    DGLgraph.add_edges(indices[0], indices[1])
+    DGLgraph = dgl.graph((indices[0], indices[1]), num_nodes=num_nodes)
 
     return DGLgraph
+
+
+class GraphNN(nn.Module):
+    def __init__(self, embed_dim):
+        super(GraphNN, self).__init__()
+        print("my GNN")
+
+        num_heads = 3
+
+        self.conv0 = EdgeGATConv(in_feats=5, edge_feats=1, out_feats=16,
+                                 num_heads=num_heads, allow_zero_in_degree=True).to(device)
+        self.conv1 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=embed_dim,
+                                 num_heads=num_heads, allow_zero_in_degree=True).to(device)
+
+        self.node_norm = nn.LayerNorm(5, eps=1e-5).to(device)
+        self.linear = nn.Sequential(nn.LayerNorm((numberOfJobs+numberOfMachines)*embed_dim),
+                                    nn.Linear((numberOfJobs+numberOfMachines)*embed_dim, embed_dim)).to(device)
+
+    def forward(self, td: TensorDict) -> torch.Tensor:
+        # td: td
+        # Output: [batch_size, embed_dim]
+
+        Graph, h, L, W, P, N = td["Graph"], td["h"], td["L"], td["W"], td["P"], td["N"]
+        bs = td.batch_size[0]
+        Graph = Graph.reshape(bs, numberOfJobs, numberOfJobs+numberOfMachines)
+
+        square_Graph = torch.zeros(bs, numberOfJobs+numberOfMachines, numberOfJobs+numberOfMachines).to(device)
+        square_Graph[:, :numberOfJobs, :numberOfJobs + numberOfMachines] = Graph
+        dgl_Graph = tensor_to_dgl(square_Graph)
+
+
+        otherFeatures = torch.cat((W, P, N), dim=1).unsqueeze(1).repeat(1, numberOfJobs, 1)
+
+        # jobFeatures形状为 B*numberOfJobs*5(h_i,L_i,W_i,P_i,n_i)
+        jobFeatures = torch.cat((td["jobList"], otherFeatures), dim=-1)
+
+        # machineFeatures填充全为0，大小为B*numberOfMachines*5
+        machineFeatures = torch.zeros((bs, numberOfMachines, 5)).to(device)
+
+        nodeFeatures = torch.cat((jobFeatures, machineFeatures), dim=1).reshape(-1, 5)
+        nodeFeatures = self.node_norm(nodeFeatures)
+
+
+        # 先将T矩阵填充到G方阵大小，然后根据index直接取出对应的元素作为边的数值
+        T_matrix = torch.zeros_like(square_Graph).to(device)
+        T_matrix[:, :numberOfJobs, :numberOfJobs] = td["T"]
+
+        edge_indices = torch.nonzero(square_Graph)
+        batch_idx, row_idx, col_idx = edge_indices[:, 0], edge_indices[:, 1], edge_indices[:, 2]
+        edgeFeatures = T_matrix[batch_idx, row_idx, col_idx].reshape(-1, 1)
+
+
+        zro_time_node_feats = self.conv0(dgl_Graph, nodeFeatures, edgeFeatures)
+        zro_time_node_feats = F.leaky_relu(zro_time_node_feats)
+        fst_time_node_feats = self.conv1(dgl_Graph, zro_time_node_feats.mean(dim=1), edgeFeatures)
+        fst_time_node_feats = F.leaky_relu(fst_time_node_feats)
+
+        conv_out = fst_time_node_feats.mean(dim=1).reshape(bs, -1)
+        conv_out = self.linear(conv_out)
+        conv_out = F.leaky_relu(conv_out)
+
+        return conv_out
 
 
 # All For Test
@@ -64,10 +143,11 @@ class NOMAInitEmbedding(nn.Module):
                                      nn.LayerNorm(embed_dim),
                                      nn.ReLU()).to(device)
 
-    def forward(self, td):
+    def forward(self, td: TensorDict) -> torch.Tensor:
         # Input: td
         # Output: [batch_size, num_nodes, embed_dim]
 
+        # 把h, L, W, P, N, _tensor拼接起来后，过一堆网络，直接复制到所有节点，作为输出
         h, L, W, P, N, _tensor = td["h"], td["L"], td["W"], td["P"], td["N"], torch.zeros_like(td["W"])
         concatenated_tensor = torch.cat((h, L, W, P, N, _tensor), dim=1).to(device)
         encoder_output = self.encoder(concatenated_tensor)
@@ -78,17 +158,16 @@ class NOMAContext(nn.Module):
     def __init__(self, embed_dim,  linear_bias=True):
         print("###NOMAContext###")
         super(NOMAContext, self).__init__()
-        self.norm = nn.LayerNorm(embed_dim)
-        self.linear = nn.Linear((numberOfJobs*(numberOfJobs + numberOfMachines))*embed_dim, embed_dim, linear_bias)
 
-    def forward(self, embeddings, td):
+        self.GNN = GraphNN(embed_dim=embed_dim)
+
+    def forward(self, embeddings: torch.Tensor, td: TensorDict) -> torch.Tensor:
         # embeddings: [batch_size, num_nodes, embed_dim]
         # td: td
         # Output: [batch_size, embed_dim]
 
-        embeddings = self.norm(embeddings)
-        embeddings = embeddings.view(embeddings.shape[0], -1)
-        return self.linear(embeddings)
+        return self.GNN(td)
+
 
 
 class NOMADynamicEmbedding(nn.Module):
@@ -96,5 +175,5 @@ class NOMADynamicEmbedding(nn.Module):
         print("###NOMADynamicEmbedding###")
         super(NOMADynamicEmbedding, self).__init__()
 
-    def forward(self, td):
+    def forward(self, td: TensorDict):
         return 0, 0, 0
