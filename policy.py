@@ -141,7 +141,7 @@ class NOMAInitEmbedding(nn.Module):
                                      transformer_encoder,
                                      nn.Linear(d_model, embed_dim, linear_bias),
                                      nn.LayerNorm(embed_dim),
-                                     nn.ReLU()).to(device)
+                                     nn.LeakyReLU()).to(device)
 
     def forward(self, td: TensorDict) -> torch.Tensor:
         # Input: td
@@ -159,15 +159,29 @@ class NOMAContext(nn.Module):
         print("###NOMAContext###")
         super(NOMAContext, self).__init__()
 
-        self.GNN = GraphNN(embed_dim=embed_dim)
+        self.for_embedding = nn.Sequential(nn.Linear(embed_dim, embed_dim, linear_bias),
+                                           nn.LayerNorm(embed_dim),
+                                           nn.LeakyReLU()).to(device)
+
+        self.GNN = GraphNN(embed_dim=embed_dim).to(device)
+
+        self.linear = nn.Linear(embed_dim, embed_dim, linear_bias).to(device)
+
+
 
     def forward(self, embeddings: torch.Tensor, td: TensorDict) -> torch.Tensor:
         # embeddings: [batch_size, num_nodes, embed_dim]
         # td: td
         # Output: [batch_size, embed_dim]
 
-        return self.GNN(td)
+        embeddings = embeddings.mean(dim=1)
+        embeddings = self.for_embedding(embeddings)
 
+        gnn_output = self.GNN(td)
+
+        output = F.leaky_relu(self.linear(embeddings + gnn_output))
+
+        return output
 
 
 class NOMADynamicEmbedding(nn.Module):
