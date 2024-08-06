@@ -22,16 +22,17 @@ policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed s
 # model = AttentionModel(env,
 #                        policy=policy,
 #                        baseline='rollout',
-#                        train_data_size=128,
-#                        val_data_size=128)
+#                        train_data_size=8,
+#                        val_data_size=8)
 
-model = PPO(env, policy=policy, train_data_size=64, val_data_size=64, critic_kwargs={"embed_dim": emb_dim})
+model = PPO(env, policy=policy, train_data_size=64, val_data_size=64, normalize_adv=True, critic_kwargs={"embed_dim": emb_dim})
 
 # Greedy rollouts over untrained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-td_init = env.reset(batch_size=BATCH_SIZE).to(device)
+td_init = env.reset(batch_size=BATCH_SIZE)
 policy = model.policy.to(device)
-# breakpoint()
+
+
 # out = policy(td_init.clone(), env, phase="test", decode_type="sampling", return_actions=True)
 # print(out)
 # actions_untrained = out['actions'].cpu().detach()
@@ -43,5 +44,5 @@ policy = model.policy.to(device)
 trainer = RL4COTrainer(max_epochs=20, devices=1, log_every_n_steps=1)
 trainer.fit(model)
 
-# out = policy(td_init.clone(), env, phase="test", decode_type="greedy", return_actions=True)
-# actions_trained = out['actions'].cpu().detach()
+out = policy(td_init.clone(), env, phase="test", decode_type="greedy", return_actions=True)
+print(out)
