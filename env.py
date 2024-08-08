@@ -75,14 +75,24 @@ def sample_env(batch_size: list) -> tuple:
         tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
         tmp1 = 10 ** tmp0
         _h = 1 / tmp1
-        return _h
+        return _h, d
 
-    h = torch.tensor([sorted([h_distribution() for _ in range(numberOfJobs)], reverse=True) for _ in range(batch_size)])
+    # h与d负相关
+    h_and_d = torch.tensor([sorted([h_distribution() for _ in range(numberOfJobs)], reverse=True, key=lambda x: x[0]) for _ in range(batch_size)])
+    h, norm_h = h_and_d[:, :, 0], h_and_d[:, :, 1]
+
     L = torch.tensor(np.random.randint(1, 1024, size=(batch_size, numberOfJobs)).tolist())
+    norm_L = L / 200
+
     W = torch.tensor([[180 / numberOfMachines * 1000] for _ in range(batch_size)])
+    norm_W = W / 2000
+
     P = torch.tensor([[0.1] for _ in range(batch_size)])
+    norm_P = P.clone()
+
     N = torch.tensor([[(10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)] for _ in range(batch_size)])
-    return h, L, W, P, N
+    norm_N = norm_W.clone() / 5
+    return h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N
 
 
 def action_to_tensor(Action: torch.Tensor) -> torch.Tensor:
@@ -101,7 +111,7 @@ class NOMAGenerator(Generator):
         # print("###Generator###")
 
     def _generate(self, batch_size) -> TensorDict:
-        h, L, W, P, N = sample_env(batch_size=batch_size)
+        h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N = sample_env(batch_size=batch_size)
         bs = batch_size[0] if isinstance(batch_size, list) else batch_size
         Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
         jobList = torch.stack((h, L), dim=-1)
@@ -118,6 +128,11 @@ class NOMAGenerator(Generator):
                 "jobList": jobList,
                 "T": T,
                 "T_list": T_list,
+                "norm_h": norm_h,
+                "norm_L": norm_L,
+                "norm_W": norm_W,
+                "norm_P": norm_P,
+                "norm_N": norm_N,
             },
             batch_size=batch_size,
         )
@@ -184,27 +199,13 @@ class NOMAenv(RL4COEnvBase):
         #     init_Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
 
-        # Other variables
-        h = td["h"]
-        L = td["L"]
-        W = td["W"]
-        P = td["P"]
-        N = td["N"]
-        jobList = td["jobList"]
-
         return TensorDict(
             {
-                "Graph": init_Graph,
-                "h": h,
-                "L": L,
-                "W": W,
-                "P": P,
-                "N": N,
                 "action_mask": mask(init_Graph),
-                "jobList": jobList,
             },
             batch_size=batch_size,
         )
+
 
     def _make_spec(self, generator: NOMAGenerator):
         self.observation_spec = CompositeSpec(
@@ -231,6 +232,26 @@ class NOMAenv(RL4COEnvBase):
                 dtype=torch.float32,
             ),
             N=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_h=UnboundedContinuousTensorSpec(
+                shape=(numberOfJobs),
+                dtype=torch.float32,
+            ),
+            norm_L=UnboundedDiscreteTensorSpec(
+                shape=(numberOfJobs),
+                dtype=torch.float32,
+            ),
+            norm_W=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_P=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_N=UnboundedDiscreteTensorSpec(
                 shape=(1),
                 dtype=torch.float32,
             ),
@@ -288,8 +309,7 @@ class NOMAenv(RL4COEnvBase):
         ret, _ = torch.max(torch.stack((totalTime_dummy, self.calculate_time_nodummy(td))), dim=0)
         return ret
 
-from rl4co.models import AttentionModelPolicy, POMO
-from rl4co.utils import RL4COTrainer
+
 if __name__ == "__main__":
     env = NOMAenv()
     env.reset(batch_size=[BATCH_SIZE])
