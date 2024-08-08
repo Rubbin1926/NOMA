@@ -20,6 +20,7 @@ from rl4co.envs.common.utils import Generator, get_sampler
 numberOfJobs = 4
 numberOfMachines = 2
 BATCH_SIZE = 2
+assert (numberOfJobs+numberOfMachines) % 2 == 0, "(numberOfJobs+numberOfMachines)需要是偶数！"
 
 
 def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
@@ -85,7 +86,7 @@ def sample_env(batch_size: list) -> tuple:
     norm_L = L / 200
 
     W = torch.tensor([[180 / numberOfMachines * 1000] for _ in range(batch_size)])
-    norm_W = W / 2000
+    norm_W = W / 20000
 
     P = torch.tensor([[0.1] for _ in range(batch_size)])
     norm_P = P.clone()
