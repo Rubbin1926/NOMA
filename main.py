@@ -1,5 +1,5 @@
 from env import NOMAenv, BATCH_SIZE
-from policy import NOMAInitEmbedding, NOMAContext, NOMADynamicEmbedding
+from policy import NOMAInitEmbedding, NOMAContext, NOMADynamicEmbedding, MyCriticNetwork
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,13 @@ policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed s
 #                        train_data_size=8,
 #                        val_data_size=8)
 
-model = PPO(env, policy=policy, train_data_size=64, val_data_size=64, normalize_adv=True, critic_kwargs={"embed_dim": emb_dim})
+model = PPO(env,
+            policy=policy,
+            train_data_size=64,
+            val_data_size=64,
+            normalize_adv=True,
+            critic=MyCriticNetwork(embed_dim=emb_dim),
+            critic_kwargs={"embed_dim": emb_dim})
 
 # Greedy rollouts over untrained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
