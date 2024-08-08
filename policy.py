@@ -4,9 +4,9 @@ from torch import nn
 import torch.nn.functional as F
 import math
 from dgl.nn import EdgeGATConv
-from torch.distributions import Categorical
 from env import numberOfJobs, numberOfMachines, BATCH_SIZE
 from tensordict.tensordict import TensorDict
+from rl4co.models.rl.common.critic import CriticNetwork
 
 """
 TensorDict(
@@ -23,6 +23,11 @@ TensorDict(
         done: Tensor(shape=torch.Size([2]), device=cpu, dtype=torch.bool, is_shared=False),
         h: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.float32, is_shared=False),
         jobList: Tensor(shape=torch.Size([2, 4, 2]), device=cpu, dtype=torch.float32, is_shared=False),
+        norm_L: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.float32, is_shared=False),
+        norm_N: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
+        norm_P: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
+        norm_W: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
+        norm_h: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.float32, is_shared=False),
         reward: Tensor(shape=torch.Size([2]), device=cpu, dtype=torch.float32, is_shared=False),
         terminated: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.bool, is_shared=False)},
     batch_size=torch.Size([2]),
@@ -78,8 +83,7 @@ class GraphNN(nn.Module):
                                  num_heads=num_heads, allow_zero_in_degree=True)
 
         self.node_norm = nn.LayerNorm(5, eps=1e-5)
-        self.linear = nn.Sequential(nn.LayerNorm((numberOfJobs+numberOfMachines)*embed_dim),
-                                    nn.Linear((numberOfJobs+numberOfMachines)*embed_dim, embed_dim))
+        self.linear = nn.Linear((numberOfJobs+numberOfMachines)*embed_dim, embed_dim)
 
     def forward(self, td: TensorDict) -> torch.Tensor:
         # td: td
@@ -87,7 +91,9 @@ class GraphNN(nn.Module):
 
         device = td["Graph"].device
         self.to(device)
-        Graph, h, L, W, P, N = td["Graph"], td["h"], td["L"], td["W"], td["P"], td["N"]
+
+        # 使用手动Norm过的数据
+        Graph, h, L, W, P, N = td["Graph"], td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
         bs = td.batch_size[0]
         Graph = Graph.reshape(bs, numberOfJobs, numberOfJobs+numberOfMachines)
 
@@ -99,7 +105,8 @@ class GraphNN(nn.Module):
         otherFeatures = torch.cat((W, P, N), dim=1).unsqueeze(1).repeat(1, numberOfJobs, 1)
 
         # jobFeatures形状为 B*numberOfJobs*5(h_i,L_i,W_i,P_i,n_i)
-        jobFeatures = torch.cat((td["jobList"], otherFeatures), dim=-1)
+        jobList = torch.stack((h, L), dim=-1)
+        jobFeatures = torch.cat((jobList, otherFeatures), dim=-1)
 
         # machineFeatures填充全为0，大小为B*numberOfMachines*5
         machineFeatures = torch.zeros((bs, numberOfMachines, 5)).to(device)
@@ -129,34 +136,68 @@ class GraphNN(nn.Module):
         return conv_out
 
 
+class MyCriticNetwork(CriticNetwork):
+    def __init__(self, embed_dim):
+        super(CriticNetwork, self).__init__()
+        print("my critic network")
+
+        hidden_dim = 256
+
+        self.GNN = GraphNN(embed_dim=embed_dim)
+        self.linear = nn.Sequential(nn.Linear(embed_dim, hidden_dim),
+                                    nn.LeakyReLU(),
+                                    nn.Linear(hidden_dim, 1))
+
+    def forward(self, td):
+        # td: td
+        # Output: [batch_size, 1]
+
+        device = td["Graph"].device
+        self.to(device)
+
+        gnn_output = self.GNN(td)
+        output = self.linear(gnn_output)
+
+        return output
+
+
 # All For Test
 class NOMAInitEmbedding(nn.Module):
-    def __init__(self, embed_dim, linear_bias=True, numberOfJobs=numberOfJobs):
+    def __init__(self, embed_dim, linear_bias=True):
         print("###NOMAInitEmbedding###")
         super(NOMAInitEmbedding, self).__init__()
 
-        d_model = 2 * numberOfJobs + 4
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=2, dim_feedforward=512, dropout=0,
-                                                   batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=numberOfJobs+numberOfMachines, nhead=2, dim_feedforward=512, dropout=0,
+                                                   batch_first=True, layer_norm_eps=1e-5)
         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
-        self.encoder = nn.Sequential(nn.LayerNorm(d_model),
-                                     transformer_encoder,
-                                     nn.Linear(d_model, embed_dim, linear_bias),
-                                     nn.LayerNorm(embed_dim),
+        self.encoder = nn.Sequential(transformer_encoder,
+                                     nn.Linear(numberOfJobs+numberOfMachines, embed_dim, linear_bias),
                                      nn.LeakyReLU())
+        self.linear = nn.Linear(7*embed_dim, (numberOfJobs*(numberOfJobs+numberOfMachines))*embed_dim, linear_bias)
 
     def forward(self, td: TensorDict) -> torch.Tensor:
         # Input: td
         # Output: [batch_size, num_nodes, embed_dim]
 
         device = td["Graph"].device
+        bs = td.batch_size[0]
         self.to(device)
 
-        # 把h, L, W, P, N, _tensor拼接起来后，过一堆网络，直接复制到所有节点，作为输出
-        h, L, W, P, N, _tensor = td["h"], td["L"], td["W"], td["P"], td["N"], torch.zeros_like(td["W"])
-        concatenated_tensor = torch.cat((h, L, W, P, N, _tensor), dim=1)
-        encoder_output = self.encoder(concatenated_tensor)
-        return encoder_output.unsqueeze(1).repeat(1, numberOfJobs*(numberOfJobs+numberOfMachines), 1)
+        h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
+        feats_tensor = torch.zeros((bs, 7, numberOfJobs+numberOfMachines), device=device)
+
+        feats_tensor[:, 0, numberOfJobs:] = 1
+        feats_tensor[:, 1, :numberOfJobs] = 1
+
+        feats_tensor[:, 2, :numberOfJobs] = h
+        feats_tensor[:, 3, :numberOfJobs] = L
+
+        feats_tensor[:, 4, numberOfJobs:] = W
+        feats_tensor[:, 5, numberOfJobs:] = P
+        feats_tensor[:, 6, numberOfJobs:] = N
+
+        encoder_output = self.linear(self.encoder(feats_tensor).reshape(bs, -1))
+        return encoder_output.reshape(bs, numberOfJobs*(numberOfJobs+numberOfMachines), -1)
 
 
 class NOMAContext(nn.Module):
@@ -165,14 +206,11 @@ class NOMAContext(nn.Module):
         super(NOMAContext, self).__init__()
 
         self.for_embedding = nn.Sequential(nn.Linear(embed_dim, embed_dim, linear_bias),
-                                           nn.LayerNorm(embed_dim),
                                            nn.LeakyReLU())
 
         self.GNN = GraphNN(embed_dim=embed_dim)
 
         self.linear = nn.Linear(embed_dim, embed_dim, linear_bias)
-
-
 
     def forward(self, embeddings: torch.Tensor, td: TensorDict) -> torch.Tensor:
         # embeddings: [batch_size, num_nodes, embed_dim]
@@ -184,7 +222,9 @@ class NOMAContext(nn.Module):
 
         embeddings = embeddings.mean(dim=1)
         embeddings = self.for_embedding(embeddings)
-
+        # for name, param in self.GNN.named_parameters():
+        #     print(f"Parameter: {param.device}")
+        # print(td["W"].device)
         gnn_output = self.GNN(td)
 
         output = F.leaky_relu(self.linear(embeddings + gnn_output))
