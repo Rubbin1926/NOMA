@@ -145,6 +145,7 @@ class MyCriticNetwork(CriticNetwork):
 
         self.GNN = GraphNN(embed_dim=embed_dim)
         self.linear = nn.Sequential(nn.Linear(embed_dim, hidden_dim),
+                                    nn.LayerNorm(hidden_dim, eps=1e-5),
                                     nn.LeakyReLU(),
                                     nn.Linear(hidden_dim, 1))
 
@@ -172,6 +173,7 @@ class NOMAInitEmbedding(nn.Module):
         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
         self.encoder = nn.Sequential(transformer_encoder,
                                      nn.Linear(numberOfJobs+numberOfMachines, embed_dim, linear_bias),
+                                     nn.LayerNorm(embed_dim, eps=1e-5),
                                      nn.LeakyReLU())
         self.linear = nn.Linear(7*embed_dim, (numberOfJobs*(numberOfJobs+numberOfMachines))*embed_dim, linear_bias)
 
@@ -206,6 +208,7 @@ class NOMAContext(nn.Module):
         super(NOMAContext, self).__init__()
 
         self.for_embedding = nn.Sequential(nn.Linear(embed_dim, embed_dim, linear_bias),
+                                           nn.LayerNorm(embed_dim, eps=1e-5),
                                            nn.LeakyReLU())
 
         self.GNN = GraphNN(embed_dim=embed_dim)
