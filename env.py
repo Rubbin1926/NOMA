@@ -17,7 +17,7 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.common.utils import Generator, get_sampler
 
 
-numberOfJobs = 4
+numberOfJobs = 8
 numberOfMachines = 2
 BATCH_SIZE = 2
 assert (numberOfJobs+numberOfMachines) % 2 == 0, "(numberOfJobs+numberOfMachines)需要是偶数！"
@@ -60,7 +60,7 @@ def mask(Graph: torch.Tensor) -> torch.Tensor:
     col = torch.sum(Graph, dim=1, keepdim=True)
 
     left = left - row - torch.transpose(row, 1, 2) - col[:, :, 0:graph_shape[0]] - torch.transpose(col[:, :, 0:graph_shape[0]], 1, 2)
-    left = torch.where(left == 1, torch.tensor(1).float(), torch.tensor(0).float())
+    left = torch.where(left == 1, torch.tensor(1), torch.tensor(0))
     left = left.triu(diagonal=1)
     right -= row
 
@@ -287,6 +287,8 @@ class NOMAenv(RL4COEnvBase):
     def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
         Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+        T = T.reshape(-1, numberOfJobs, numberOfJobs)
+        T_list = T_list.reshape(-1, 1, numberOfJobs)
 
         G_tmp = Graph[:, :, 0:numberOfJobs]
         row = torch.sum(G_tmp, dim=-1)
@@ -303,6 +305,7 @@ class NOMAenv(RL4COEnvBase):
     def calculate_time_dummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T_list = td["Graph"], td["T_list"]
         Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+        T_list = T_list.reshape(-1, 1, numberOfJobs)
 
         row = torch.sum(Graph, dim=-1).reshape_as(T_list)
         totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
