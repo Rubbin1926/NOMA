@@ -20,6 +20,7 @@ from rl4co.envs.common.utils import Generator, get_sampler
 numberOfJobs = 8
 numberOfMachines = 2
 BATCH_SIZE = 2
+reward_multiplicative_factor = 1000
 assert (numberOfJobs+numberOfMachines) % 2 == 0, "(numberOfJobs+numberOfMachines)需要是偶数！"
 
 
@@ -311,7 +312,7 @@ class NOMAenv(RL4COEnvBase):
         totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
 
         ret, _ = torch.max(torch.stack((totalTime_dummy, self.calculate_time_nodummy(td))), dim=0)
-        return ret
+        return reward_multiplicative_factor * ret
 
 
 if __name__ == "__main__":
