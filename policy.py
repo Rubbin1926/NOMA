@@ -79,10 +79,12 @@ class GraphNN(nn.Module):
 
         self.conv0 = EdgeGATConv(in_feats=5, edge_feats=1, out_feats=16,
                                  num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv1 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=embed_dim,
+        self.conv1 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=64,
+                                 num_heads=num_heads, allow_zero_in_degree=True)
+        self.conv2 = EdgeGATConv(in_feats=64, edge_feats=1, out_feats=embed_dim,
                                  num_heads=num_heads, allow_zero_in_degree=True)
 
-        self.node_norm = nn.LayerNorm(5, eps=1e-5)
+        # self.node_norm = nn.LayerNorm(5, eps=1e-5)
         self.linear = nn.Linear((numberOfJobs+numberOfMachines)*embed_dim, embed_dim)
 
     def forward(self, td: TensorDict) -> torch.Tensor:
@@ -112,7 +114,7 @@ class GraphNN(nn.Module):
         machineFeatures = torch.zeros((bs, numberOfMachines, 5)).to(device)
 
         nodeFeatures = torch.cat((jobFeatures, machineFeatures), dim=1).reshape(-1, 5)
-        nodeFeatures = self.node_norm(nodeFeatures)
+        # nodeFeatures = self.node_norm(nodeFeatures)
 
 
         # 先将T矩阵填充到G方阵大小，然后根据index直接取出对应的元素作为边的数值
@@ -128,8 +130,10 @@ class GraphNN(nn.Module):
         zro_time_node_feats = F.leaky_relu(zro_time_node_feats)
         fst_time_node_feats = self.conv1(dgl_Graph, zro_time_node_feats.mean(dim=1), edgeFeatures)
         fst_time_node_feats = F.leaky_relu(fst_time_node_feats)
+        snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edgeFeatures)
+        snd_time_node_feats = F.leaky_relu(snd_time_node_feats)
 
-        conv_out = fst_time_node_feats.mean(dim=1).reshape(bs, -1)
+        conv_out = snd_time_node_feats.mean(dim=1).reshape(bs, -1)
         conv_out = self.linear(conv_out)
         conv_out = F.leaky_relu(conv_out)
 
