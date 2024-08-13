@@ -31,7 +31,9 @@ def calculate_time_dummy(td: TensorDict, numberOfJobs, numberOfMachines) -> torc
     totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
 
     ret, _ = torch.max(torch.stack((totalTime_dummy, calculate_time_nodummy(td, numberOfJobs, numberOfMachines))), dim=0)
-    return reward_multiplicative_factor * ret
+
+    # 注意此结果为负的时间
+    return -reward_multiplicative_factor * ret
 
 
 def generate_mask_list(Mask: torch.Tensor) -> list[torch.Tensor]:
