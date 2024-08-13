@@ -7,6 +7,8 @@ from dgl.nn import EdgeGATConv
 from env import numberOfJobs, numberOfMachines
 from tensordict.tensordict import TensorDict
 from rl4co.models.rl.common.critic import CriticNetwork
+from search import find_best_solution
+import wandb
 
 """
 TensorDict(
@@ -222,7 +224,7 @@ class NOMAInitEmbedding(nn.Module):
         print("###NOMAInitEmbedding###")
         super(NOMAInitEmbedding, self).__init__()
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=numberOfJobs+numberOfMachines, nhead=2, dim_feedforward=512, dropout=0,
+        encoder_layer = nn.TransformerEncoderLayer(d_model=numberOfJobs+numberOfMachines, nhead=2, dim_feedforward=128, dropout=0,
                                                    batch_first=True, layer_norm_eps=1e-5)
         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
         self.encoder = nn.Sequential(transformer_encoder,
@@ -269,6 +271,9 @@ class NOMAContext(nn.Module):
 
         self.linear = nn.Linear(embed_dim, embed_dim, linear_bias)
 
+        self.embed_dim = embed_dim
+        self.flag = False  # 标志初始化为False
+
     def forward(self, embeddings: torch.Tensor, td: TensorDict) -> torch.Tensor:
         # embeddings: [batch_size, num_nodes, embed_dim]
         # td: td
@@ -276,6 +281,8 @@ class NOMAContext(nn.Module):
 
         device = td["Graph"].device
         self.to(device)
+
+        self.log_best_solution(td=td)
 
         embeddings = embeddings.mean(dim=1)
         embeddings = self.for_embedding(embeddings)
@@ -287,6 +294,29 @@ class NOMAContext(nn.Module):
         output = F.leaky_relu(self.linear(embeddings + gnn_output))
 
         return output
+
+    def log_best_solution(self, td: TensorDict):
+        device = td["Graph"].device
+        numberOfJobs = td["h"].shape[-1]
+        numberOfMachines = (td["Graph"].shape[-1] // numberOfJobs) - numberOfJobs
+
+        if not self.flag:  # 检查标志是否为False
+            # 只在第一次调用forward时执行以下代码
+            # 这里可以放入你希望只执行一次的代码
+            self.list_of_solution = find_best_solution(td.cpu())
+
+            self.flag = True  # 将标志设置为True，确保代码只执行一次
+
+        Value_lst = []
+        for i in range(td.batch_size[0]):
+            graph = str(td["Graph"][i].reshape(numberOfJobs, -1).tolist())
+            dic = self.list_of_solution[i]
+            _, _, V_star = dic[graph]
+            Value_lst.append(V_star)
+        Value_tensor = torch.tensor(Value_lst, device=device)
+        Value_mean = Value_tensor.mean().item()
+
+        wandb.log({"Value_mean": Value_mean})
 
 
 class NOMADynamicEmbedding(nn.Module):
