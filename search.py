@@ -54,13 +54,13 @@ def find(td, Dataset):
 
     if torch.sum(Mask) == 0:
         td_tmp = TensorDict({"Graph": Graph, "T": td["T"], "T_list": td["T_list"]})
-        Dataset[Graph] = (torch.zeros_like(Graph),
+        Dataset[str(Graph.tolist())] = (torch.zeros_like(Graph),
                           Graph,
                           calculate_time_dummy(td_tmp, numberOfJobs, numberOfMachines))
         return Graph, calculate_time_dummy(td_tmp, numberOfJobs, numberOfMachines)
 
-    if Graph in Dataset:
-        return Dataset[Graph][1], Dataset[Graph][2]
+    if str(Graph.tolist()) in Dataset:
+        return Dataset[str(Graph.tolist())][1], Dataset[str(Graph.tolist())][2]
 
     V_star = -1e16
     A_star = None
@@ -75,7 +75,7 @@ def find(td, Dataset):
             A_star = action
             G_star = G_
 
-    Dataset[Graph] = (A_star,
+    Dataset[str(Graph.tolist())] = (A_star,
                       G_star,
                       V_star)
     return G_star, V_star
@@ -104,4 +104,6 @@ if __name__ == '__main__':
 
     td = env.reset(batch_size=[BATCH_SIZE])
     lst = find_best_solution(td)
-    print(lst)
+    index = torch.zeros(4, 6).to(device)
+
+    print(lst[0][str(index.tolist())])
