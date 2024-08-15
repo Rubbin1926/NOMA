@@ -17,10 +17,10 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.common.utils import Generator, get_sampler
 
 
-numberOfJobs = 8
-numberOfMachines = 2
+numberOfJobs = 24
+numberOfMachines = 4
 BATCH_SIZE = 2
-reward_multiplicative_factor = 1000
+reward_multiplicative_factor = 500
 assert (numberOfJobs+numberOfMachines) % 2 == 0, "(numberOfJobs+numberOfMachines)需要是偶数！"
 
 
@@ -47,8 +47,8 @@ def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
 def mask(Graph: torch.Tensor) -> torch.Tensor:
     """
     Return the mask of the graph
-    输入的Graph是一个batch_size * (numberOfJobs * (numberOfJobs + numberOfMachines))的二维张量
-    输出的mask是一个batch_size * (numberOfJobs * (numberOfJobs + numberOfMachines))的二维张量
+    输入的Graph是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+    输出的mask是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
     """
     Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
     batch_size = Graph.shape[0]
@@ -65,7 +65,7 @@ def mask(Graph: torch.Tensor) -> torch.Tensor:
     left = left.triu(diagonal=1)
     right -= row
 
-    ret = torch.cat((left, right), dim=2).bool().reshape(batch_size, -1)
+    ret = torch.cat((left, right), dim=2).bool()
 
     return ret
 
@@ -104,7 +104,7 @@ def action_to_tensor(Action: torch.Tensor) -> torch.Tensor:
     # actionTensor[torch.arange(Action.size(0)), rowPosition, colPosition] = 1
     actionTensor = torch.zeros((Action.size(0), numberOfJobs*(numberOfJobs + numberOfMachines))).to(Action.device)
     actionTensor[torch.arange(Action.size(0)), Action] = 1
-    return actionTensor
+    return actionTensor.reshape((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
 
 
 class NOMAGenerator(Generator):
@@ -115,7 +115,7 @@ class NOMAGenerator(Generator):
     def _generate(self, batch_size) -> TensorDict:
         h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N = sample_env(batch_size=batch_size)
         bs = batch_size[0] if isinstance(batch_size, list) else batch_size
-        Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
+        Graph = torch.zeros((bs, numberOfJobs, numberOfJobs + numberOfMachines))
         jobList = torch.stack((h, L), dim=-1)
         T, T_list = build_time_matrix(jobList, W, P, N)
 
@@ -167,12 +167,12 @@ class NOMAenv(RL4COEnvBase):
 
         Graph += (mask(Graph)) * action_to_tensor(action)
         available = mask(Graph)
-        done = torch.sum(available, dim=(-1)) == 0
+        done = torch.sum(available.reshape(td.batch_size[0], -1), dim=(-1)) == 0
 
         td.update(
             {
                 "Graph": Graph,
-                "action_mask": available,
+                "action_mask": available.reshape(td.batch_size[0], -1),
                 "done": done,
             },
         )
@@ -203,7 +203,7 @@ class NOMAenv(RL4COEnvBase):
 
         return TensorDict(
             {
-                "action_mask": mask(init_Graph),
+                "action_mask": mask(init_Graph).reshape(td.batch_size[0], -1),
             },
             batch_size=batch_size,
         )
@@ -214,7 +214,7 @@ class NOMAenv(RL4COEnvBase):
             Graph=BoundedTensorSpec(
                 low=0,
                 high=1,
-                shape=(numberOfJobs*(numberOfJobs + numberOfMachines)),
+                shape=(numberOfJobs, numberOfJobs + numberOfMachines),
                 dtype=torch.int64,
             ),
             h=UnboundedContinuousTensorSpec(
@@ -277,10 +277,10 @@ class NOMAenv(RL4COEnvBase):
 
     def get_action_mask(self, td: TensorDict) -> TensorDict:
         Graph = td["Graph"]
-        action_mask = mask(Graph)
+        action_mask = mask(Graph).reshape(td.batch_size[0], -1)
         td.update(
             {
-                "action_mask": action_mask,
+                "action_mask": action_mask.reshape(td.batch_size[0], -1),
             },
         )
         return td
@@ -312,6 +312,8 @@ class NOMAenv(RL4COEnvBase):
         totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
 
         ret, _ = torch.max(torch.stack((totalTime_dummy, self.calculate_time_nodummy(td))), dim=0)
+
+        # 注意此结果为正的时间
         return reward_multiplicative_factor * ret
 
 
