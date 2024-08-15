@@ -1,5 +1,6 @@
 import dgl
 import torch
+
 from torch import nn
 import torch.nn.functional as F
 import math
@@ -7,13 +8,14 @@ from dgl.nn import EdgeGATConv
 from env import numberOfJobs, numberOfMachines
 from tensordict.tensordict import TensorDict
 from rl4co.models.rl.common.critic import CriticNetwork
+from rl4co.models.nn.env_embeddings.dynamic import StaticEmbedding
 from search import find_best_solution
 import wandb
 
 """
 TensorDict(
     fields={
-        Graph: Tensor(shape=torch.Size([2, 24]), device=cpu, dtype=torch.float32, is_shared=False),
+        Graph: Tensor(shape=torch.Size([2, 4, 6]), device=cpu, dtype=torch.float32, is_shared=False),
         L: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.int64, is_shared=False),
         N: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
         P: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
@@ -93,7 +95,7 @@ class GraphNN(nn.Module):
 
     def forward(self, td: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
         # td: td
-        # Output: [batch_size, embed_dim]
+        # Output: [bs, numberOfJobs+numberOfMachines, embed_dim]
 
         device = td["Graph"].device
         self.to(device)
@@ -102,7 +104,7 @@ class GraphNN(nn.Module):
         Graph, h, L, W, P, N = td["Graph"], td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
         bs = td.batch_size[0]
         numberOfJobs = h.shape[-1]
-        numberOfMachines = (Graph.shape[-1] // numberOfJobs) - numberOfJobs
+        numberOfMachines = Graph.shape[-1] - numberOfJobs
         Graph = Graph.reshape(bs, numberOfJobs, numberOfJobs+numberOfMachines)
 
         square_Graph = torch.zeros(bs, numberOfJobs+numberOfMachines, numberOfJobs+numberOfMachines).to(device)
@@ -145,10 +147,7 @@ class GraphNN(nn.Module):
         embed_dim = snd_time_node_feats.shape[-1]
         conv_out = self.linear(snd_time_node_feats.reshape(bs*(numberOfJobs+numberOfMachines), -1)).reshape(bs, -1, embed_dim)
 
-        conv_out_without_num_nodes = conv_out.mean(dim=1)
-        conv_out_with_num_nodes = conv_out.repeat(1, numberOfJobs, 1)
-
-        return conv_out_without_num_nodes, conv_out_with_num_nodes
+        return conv_out
 
 
 class MyCriticNetwork(CriticNetwork):
@@ -171,10 +170,28 @@ class MyCriticNetwork(CriticNetwork):
         device = td["Graph"].device
         self.to(device)
 
-        gnn_output, _ = self.GNN(td)
+        gnn_output = self.GNN(td).mean(dim=1)
         output = self.linear(gnn_output)
 
         return output
+
+
+# class NOMAInitEmbedding(nn.Module):
+#     def __init__(self, embed_dim, linear_bias=True):
+#         print("###NOMAInitEmbedding###")
+#         super(NOMAInitEmbedding, self).__init__()
+#
+#         self.GNN = GraphNN(embed_dim=embed_dim)
+#
+#     def forward(self, td: TensorDict):
+#         # Input: td
+#         # Output: [batch_size, num_nodes, embed_dim]
+#
+#         device = td["Graph"].device
+#         self.to(device)
+#
+#         gnn_output = self.GNN(td)
+#         return gnn_output.repeat(1, numberOfJobs, 1)
 
 
 class NOMAInitEmbedding(nn.Module):
@@ -182,17 +199,51 @@ class NOMAInitEmbedding(nn.Module):
         print("###NOMAInitEmbedding###")
         super(NOMAInitEmbedding, self).__init__()
 
-        self.GNN = GraphNN(embed_dim=embed_dim)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=10, nhead=2, dim_feedforward=64, dropout=0,
+                                                   batch_first=True, layer_norm_eps=1e-5)
+        transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
+        self.encoder = nn.Sequential(transformer_encoder,
+                                     nn.Linear(10, embed_dim, linear_bias),
+                                     nn.LayerNorm(embed_dim, eps=1e-5),
+                                     nn.LeakyReLU())
+
+        self.linear = nn.Sequential(nn.Linear(embed_dim, embed_dim, linear_bias),
+                                    nn.LayerNorm(embed_dim, eps=1e-5),
+                                    nn.LeakyReLU())
 
     def forward(self, td: TensorDict) -> torch.Tensor:
         # Input: td
         # Output: [batch_size, num_nodes, embed_dim]
 
         device = td["Graph"].device
+        bs = td.batch_size[0]
+
         self.to(device)
 
-        _, gnn_output = self.GNN(td)
-        return gnn_output
+        h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
+        numberOfJobs = h.shape[-1]
+        numberOfMachines = td["Graph"].shape[-1] - numberOfJobs
+
+        feats_tensor = torch.zeros((bs, 10, numberOfJobs+numberOfMachines), device=device)
+
+        feats_tensor[:, 0, numberOfJobs:] = 1
+        feats_tensor[:, 1, :numberOfJobs] = 1
+
+        feats_tensor[:, 2, :numberOfJobs] = h
+        feats_tensor[:, 3, :numberOfJobs] = L
+
+        feats_tensor[:, 4, numberOfJobs:] = W
+        feats_tensor[:, 5, numberOfJobs:] = P
+        feats_tensor[:, 6, numberOfJobs:] = N
+
+        feats_tensor[:, 7, :] = torch.tensor(numberOfJobs, device=device)
+        feats_tensor[:, 8, :] = torch.tensor(numberOfMachines, device=device)
+
+        # feats_tensor.shape: [batch_size, numberOfJobs+numberOfMachines, 10]
+        feats_tensor = feats_tensor.permute(0, 2, 1)
+
+        encoder_output = self.encoder(feats_tensor).repeat(1, numberOfJobs, 1)
+        return self.linear(encoder_output)
 
 
 # class NOMAInitEmbedding(nn.Module):
@@ -200,55 +251,6 @@ class NOMAInitEmbedding(nn.Module):
 #         print("###NOMAInitEmbedding###")
 #         super(NOMAInitEmbedding, self).__init__()
 #
-#         encoder_layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, dim_feedforward=64, dropout=0,
-#                                                    batch_first=True, layer_norm_eps=1e-5)
-#         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
-#         self.encoder = nn.Sequential(transformer_encoder,
-#                                      nn.Linear(8, embed_dim, linear_bias),
-#                                      nn.LayerNorm(embed_dim, eps=1e-5),
-#                                      nn.LeakyReLU())
-#         self.linear = nn.Sequential(nn.LayerNorm(embed_dim, eps=1e-5),
-#                                     nn.Linear(embed_dim, embed_dim, linear_bias),
-#                                     nn.LayerNorm(embed_dim, eps=1e-5),
-#                                     nn.LeakyReLU())
-#
-#     def forward(self, td: TensorDict) -> torch.Tensor:
-#         # Input: td
-#         # Output: [batch_size, num_nodes, embed_dim]
-#
-#         device = td["Graph"].device
-#         bs = td.batch_size[0]
-#
-#         self.to(device)
-#
-#         h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
-#         numberOfJobs = h.shape[-1]
-#         numberOfMachines = (td["Graph"].shape[-1] // numberOfJobs) - numberOfJobs
-#
-#         feats_tensor = torch.zeros((bs, 8, numberOfJobs+numberOfMachines), device=device)
-#
-#         feats_tensor[:, 0, numberOfJobs:] = 1
-#         feats_tensor[:, 1, :numberOfJobs] = 1
-#
-#         feats_tensor[:, 2, :numberOfJobs] = h
-#         feats_tensor[:, 3, :numberOfJobs] = L
-#
-#         feats_tensor[:, 4, numberOfJobs:] = W
-#         feats_tensor[:, 5, numberOfJobs:] = P
-#         feats_tensor[:, 6, numberOfJobs:] = N
-#
-#         # feats_tensor.shape: [batch_size, numberOfJobs+numberOfMachines, 8]
-#         feats_tensor = feats_tensor.permute(0, 2, 1)
-#
-#         encoder_output = self.encoder(feats_tensor).repeat(1, numberOfJobs, 1)
-#         return self.linear(encoder_output)
-
-
-# class NOMAInitEmbedding(nn.Module):
-#     def __init__(self, embed_dim, linear_bias=True):
-#         print("###NOMAInitEmbedding###")
-#         super(NOMAInitEmbedding, self).__init__()
-# 
 #         encoder_layer = nn.TransformerEncoderLayer(d_model=numberOfJobs+numberOfMachines, nhead=2, dim_feedforward=128, dropout=0,
 #                                                    batch_first=True, layer_norm_eps=1e-5)
 #         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
@@ -257,28 +259,28 @@ class NOMAInitEmbedding(nn.Module):
 #                                      nn.LayerNorm(embed_dim, eps=1e-5),
 #                                      nn.LeakyReLU())
 #         self.linear = nn.Linear(7*embed_dim, (numberOfJobs*(numberOfJobs+numberOfMachines))*embed_dim, linear_bias)
-# 
+#
 #     def forward(self, td: TensorDict) -> torch.Tensor:
 #         # Input: td
 #         # Output: [batch_size, num_nodes, embed_dim]
-# 
+#
 #         device = td["Graph"].device
 #         bs = td.batch_size[0]
 #         self.to(device)
-# 
+#
 #         h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
 #         feats_tensor = torch.zeros((bs, 7, numberOfJobs+numberOfMachines), device=device)
-# 
+#
 #         feats_tensor[:, 0, numberOfJobs:] = 1
 #         feats_tensor[:, 1, :numberOfJobs] = 1
-# 
+#
 #         feats_tensor[:, 2, :numberOfJobs] = h
 #         feats_tensor[:, 3, :numberOfJobs] = L
-# 
+#
 #         feats_tensor[:, 4, numberOfJobs:] = W
 #         feats_tensor[:, 5, numberOfJobs:] = P
 #         feats_tensor[:, 6, numberOfJobs:] = N
-# 
+#
 #         encoder_output = self.linear(self.encoder(feats_tensor).reshape(bs, -1))
 #         return encoder_output.reshape(bs, numberOfJobs*(numberOfJobs+numberOfMachines), -1)
 
@@ -307,14 +309,14 @@ class NOMAContext(nn.Module):
         device = td["Graph"].device
         self.to(device)
 
-        self.log_best_solution(td=td)
+        # self.log_best_solution(td=td)
 
         embeddings = embeddings.mean(dim=1)
         embeddings = self.for_embedding(embeddings)
         # for name, param in self.GNN.named_parameters():
         #     print(f"Parameter: {param.device}")
         # print(td["W"].device)
-        gnn_output, _ = self.GNN(td)
+        gnn_output = self.GNN(td).mean(dim=1)
 
         output = F.leaky_relu(self.linear(embeddings + gnn_output))
 
@@ -323,7 +325,6 @@ class NOMAContext(nn.Module):
     def log_best_solution(self, td: TensorDict):
         device = td["Graph"].device
         numberOfJobs = td["h"].shape[-1]
-        numberOfMachines = (td["Graph"].shape[-1] // numberOfJobs) - numberOfJobs
 
         if not self.flag:  # 检查标志是否为False
             # 只在第一次调用forward时执行以下代码
@@ -344,7 +345,7 @@ class NOMAContext(nn.Module):
         wandb.log({"Value_mean": Value_mean})
 
 
-class NOMADynamicEmbedding(nn.Module):
+class NOMADynamicEmbedding(StaticEmbedding):
     def __init__(self, *args, **kwargs):
         print("###NOMADynamicEmbedding###")
         super(NOMADynamicEmbedding, self).__init__()
