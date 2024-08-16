@@ -93,9 +93,9 @@ class GraphNN(nn.Module):
         # self.node_norm = nn.LayerNorm(5, eps=1e-5)
         self.linear = nn.Linear(num_heads * embed_dim, embed_dim)
 
-    def forward(self, td: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, td: TensorDict) -> torch.Tensor:
         # td: td
-        # Output: [bs, numberOfJobs+numberOfMachines, embed_dim]
+        # Output: [batch_size, numberOfJobs+numberOfMachines, embed_dim]
 
         device = td["Graph"].device
         self.to(device)
@@ -155,11 +155,10 @@ class MyCriticNetwork(CriticNetwork):
         super(CriticNetwork, self).__init__()
         print("my critic network")
 
-        hidden_dim = 256
+        hidden_dim = embed_dim // 2
 
         self.GNN = GraphNN(embed_dim=embed_dim)
         self.linear = nn.Sequential(nn.Linear(embed_dim, hidden_dim),
-                                    nn.LayerNorm(hidden_dim, eps=1e-5),
                                     nn.LeakyReLU(),
                                     nn.Linear(hidden_dim, 1))
 
@@ -168,12 +167,16 @@ class MyCriticNetwork(CriticNetwork):
         # Output: [batch_size, 1]
 
         device = td["Graph"].device
+        bs = td.batch_size[0]
+        numberOfJobs = td["h"].shape[-1]
+        numberOfMachines = td["Graph"].shape[-1] - numberOfJobs
         self.to(device)
 
-        gnn_output = self.GNN(td).mean(dim=1)
-        output = self.linear(gnn_output)
+        gnn_output = self.GNN(td)
+        output = self.linear(gnn_output).reshape(bs, -1)
+        output, _ = torch.min(output, dim=-1)
 
-        return output
+        return output.reshape(bs, -1)
 
 
 # class NOMAInitEmbedding(nn.Module):
@@ -250,7 +253,7 @@ class NOMAInitEmbedding(nn.Module):
 #     def __init__(self, embed_dim, linear_bias=True):
 #         print("###NOMAInitEmbedding###")
 #         super(NOMAInitEmbedding, self).__init__()
-#
+# 
 #         encoder_layer = nn.TransformerEncoderLayer(d_model=numberOfJobs+numberOfMachines, nhead=2, dim_feedforward=128, dropout=0,
 #                                                    batch_first=True, layer_norm_eps=1e-5)
 #         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
@@ -259,28 +262,28 @@ class NOMAInitEmbedding(nn.Module):
 #                                      nn.LayerNorm(embed_dim, eps=1e-5),
 #                                      nn.LeakyReLU())
 #         self.linear = nn.Linear(7*embed_dim, (numberOfJobs*(numberOfJobs+numberOfMachines))*embed_dim, linear_bias)
-#
+# 
 #     def forward(self, td: TensorDict) -> torch.Tensor:
 #         # Input: td
 #         # Output: [batch_size, num_nodes, embed_dim]
-#
+# 
 #         device = td["Graph"].device
 #         bs = td.batch_size[0]
 #         self.to(device)
-#
+# 
 #         h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
 #         feats_tensor = torch.zeros((bs, 7, numberOfJobs+numberOfMachines), device=device)
-#
+# 
 #         feats_tensor[:, 0, numberOfJobs:] = 1
 #         feats_tensor[:, 1, :numberOfJobs] = 1
-#
+# 
 #         feats_tensor[:, 2, :numberOfJobs] = h
 #         feats_tensor[:, 3, :numberOfJobs] = L
-#
+# 
 #         feats_tensor[:, 4, numberOfJobs:] = W
 #         feats_tensor[:, 5, numberOfJobs:] = P
 #         feats_tensor[:, 6, numberOfJobs:] = N
-#
+# 
 #         encoder_output = self.linear(self.encoder(feats_tensor).reshape(bs, -1))
 #         return encoder_output.reshape(bs, numberOfJobs*(numberOfJobs+numberOfMachines), -1)
 
@@ -313,9 +316,7 @@ class NOMAContext(nn.Module):
 
         embeddings = embeddings.mean(dim=1)
         embeddings = self.for_embedding(embeddings)
-        # for name, param in self.GNN.named_parameters():
-        #     print(f"Parameter: {param.device}")
-        # print(td["W"].device)
+
         gnn_output = self.GNN(td).mean(dim=1)
 
         output = F.leaky_relu(self.linear(embeddings + gnn_output))
@@ -329,6 +330,7 @@ class NOMAContext(nn.Module):
         if not self.flag:  # 检查标志是否为False
             # 只在第一次调用forward时执行以下代码
             # 这里可以放入你希望只执行一次的代码
+            print("find_best_solution...")
             self.list_of_solution = find_best_solution(td.cpu())
 
             self.flag = True  # 将标志设置为True，确保代码只执行一次
