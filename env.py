@@ -17,10 +17,10 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.common.utils import Generator, get_sampler
 
 
-numberOfJobs = 24
-numberOfMachines = 4
+numberOfJobs = 6
+numberOfMachines = 2
 BATCH_SIZE = 2
-reward_multiplicative_factor = 500
+reward_multiplicative_factor = 1000
 assert (numberOfJobs+numberOfMachines) % 2 == 0, "(numberOfJobs+numberOfMachines)需要是偶数！"
 
 
@@ -316,11 +316,27 @@ class NOMAenv(RL4COEnvBase):
         # 注意此结果为正的时间
         return reward_multiplicative_factor * ret
 
+    def step_to_end_from_actions(self, td: TensorDict, actions: torch.Tensor) -> TensorDict:
+        numberOfJobs = td["h"].shape[-1]
+        numberOfMachines = td["Graph"].shape[-1] - numberOfJobs
+
+        zero_Graph = torch.zeros_like(td["Graph"])
+        actions = actions.t()
+        td.update({"Graph": zero_Graph})
+
+        for i in range(actions.shape[0]):
+            td.update({"action": actions[i]})
+            td = self._step(td)
+
+        return td
+
 
 if __name__ == "__main__":
     env = NOMAenv()
     env.reset(batch_size=[BATCH_SIZE])
     reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), random_policy)
     print(reward)
-    print(td)
+    print(td["Graph"])
     print(actions)
+    print(env.step_to_end_from_actions(td.clone(), actions)["reward"])
+
