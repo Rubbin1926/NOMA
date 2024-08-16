@@ -57,8 +57,8 @@ def find(td, Dataset):
     if torch.sum(Mask) == 0:
         td_tmp = TensorDict({"Graph": Graph, "T": td["T"], "T_list": td["T_list"]})
         Dataset[str(Graph.tolist())] = (torch.zeros_like(Graph),
-                          Graph,
-                          calculate_time_dummy(td_tmp, numberOfJobs, numberOfMachines))
+                                        Graph,
+                                        calculate_time_dummy(td_tmp, numberOfJobs, numberOfMachines))
         return Graph, calculate_time_dummy(td_tmp, numberOfJobs, numberOfMachines)
 
     if str(Graph.tolist()) in Dataset:
@@ -77,9 +77,7 @@ def find(td, Dataset):
             A_star = action
             G_star = G_
 
-    Dataset[str(Graph.tolist())] = (A_star,
-                      G_star,
-                      V_star)
+    Dataset[str(Graph.tolist())] = (A_star, G_star, V_star)
     return G_star, V_star
 
 
@@ -97,6 +95,26 @@ def find_best_solution(td: TensorDict) -> list[dict]:
     return lst
 
 
+def print_best_solution(td: TensorDict):
+    device = td["Graph"].device
+    numberOfJobs = td["h"].shape[-1]
+
+    list_of_solution = find_best_solution(td.cpu())
+
+    Value_lst = []
+    Graph_lst = []
+    for i in range(td.batch_size[0]):
+        graph = str(td["Graph"][i].reshape(numberOfJobs, -1).tolist())
+        dic = list_of_solution[i]
+        _, G_star, V_star = dic[graph]
+        Value_lst.append(V_star)
+        Graph_lst.append(G_star)
+    Value_tensor = torch.tensor(Value_lst, device=device)
+    Graph_tensor = torch.stack(Graph_lst, dim=0).to(device)
+
+    return Value_tensor, Graph_tensor
+
+
 if __name__ == '__main__':
     from env import BATCH_SIZE
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -105,7 +123,11 @@ if __name__ == '__main__':
     env = NOMAenv()
 
     td = env.reset(batch_size=[BATCH_SIZE])
-    lst = find_best_solution(td)
-    index = torch.zeros(4, 6).to(device)
+    # lst = find_best_solution(td)
+    # index = torch.zeros(4, 6).to(device)
+    #
+    # print(lst[0][str(index.tolist())])
 
-    print(lst[0][str(index.tolist())])
+    v, g = print_best_solution(td)
+    td.update({"Graph": g})
+    env.calculate_time_nodummy(td)
