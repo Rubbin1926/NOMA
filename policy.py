@@ -81,9 +81,9 @@ class GraphNN(nn.Module):
         super(GraphNN, self).__init__()
         print("my GNN")
 
-        num_heads = 3
+        num_heads = 5
 
-        self.conv0 = EdgeGATConv(in_feats=5, edge_feats=1, out_feats=16,
+        self.conv0 = EdgeGATConv(in_feats=7, edge_feats=1, out_feats=16,
                                  num_heads=num_heads, allow_zero_in_degree=True)
         self.conv1 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=64,
                                  num_heads=num_heads, allow_zero_in_degree=True)
@@ -111,17 +111,19 @@ class GraphNN(nn.Module):
         square_Graph[:, :numberOfJobs, :numberOfJobs + numberOfMachines] = Graph
         dgl_Graph = tensor_to_dgl(square_Graph, numberOfJobs, numberOfMachines)
 
-
-        otherFeatures = torch.cat((W, P, N), dim=1).unsqueeze(1).repeat(1, numberOfJobs, 1)
-
-        # jobFeatures形状为 B*numberOfJobs*5(h_i,L_i,W_i,P_i,n_i)
+        # jobFeatures形状为 B*numberOfJobs*7(h_i,L_i,0,0,0,i,0)
         jobList = torch.stack((h, L), dim=-1)
-        jobFeatures = torch.cat((jobList, otherFeatures), dim=-1)
+        jobID = torch.arange(start=1, end=numberOfJobs+1, device=device).unsqueeze(0).repeat(bs, 1).unsqueeze(-1)
+        jobWhitePart = torch.zeros((bs, numberOfJobs, 1), device=device)
+        jobFeatures = torch.cat((jobList, jobWhitePart, jobWhitePart, jobWhitePart, jobID, jobWhitePart), dim=-1)
 
-        # machineFeatures填充全为0，大小为B*numberOfMachines*5
-        machineFeatures = torch.zeros((bs, numberOfMachines, 5)).to(device)
+        # machineFeatures形状为 B*numberOfMachines*7(0,0,W_i,P_i,P_i,0,i)
+        WPNFeatures = torch.cat((W, P, N), dim=1).unsqueeze(1).repeat(1, numberOfMachines, 1)
+        machineID = torch.arange(start=1, end=numberOfMachines+1, device=device).unsqueeze(0).repeat(bs, 1).unsqueeze(-1)
+        machineWhitePart = torch.zeros((bs, numberOfMachines, 1), device=device)
+        machineFeatures = torch.cat((machineWhitePart, machineWhitePart, WPNFeatures, machineWhitePart, machineID), dim=-1)
 
-        nodeFeatures = torch.cat((jobFeatures, machineFeatures), dim=1).reshape(-1, 5)
+        nodeFeatures = torch.cat((jobFeatures, machineFeatures), dim=1).reshape(-1, 7)
         # nodeFeatures = self.node_norm(nodeFeatures)
 
 
@@ -145,7 +147,7 @@ class GraphNN(nn.Module):
 
         # conv_out.shape: [bs, numberOfJobs+numberOfMachines, embed_dim]
         embed_dim = snd_time_node_feats.shape[-1]
-        conv_out = self.linear(snd_time_node_feats.reshape(bs*(numberOfJobs+numberOfMachines), -1)).reshape(bs, -1, embed_dim)
+        conv_out = snd_time_node_feats.mean(dim=1).reshape(bs, -1, embed_dim)
 
         return conv_out
 
@@ -202,9 +204,9 @@ class NOMAInitEmbedding(nn.Module):
         print("###NOMAInitEmbedding###")
         super(NOMAInitEmbedding, self).__init__()
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=10, nhead=2, dim_feedforward=64, dropout=0,
+        encoder_layer = nn.TransformerEncoderLayer(d_model=10, nhead=5, dim_feedforward=128, dropout=0,
                                                    batch_first=True, layer_norm_eps=1e-5)
-        transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
+        transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=6)
         self.encoder = nn.Sequential(transformer_encoder,
                                      nn.Linear(10, embed_dim, linear_bias),
                                      nn.LayerNorm(embed_dim, eps=1e-5),
@@ -239,8 +241,8 @@ class NOMAInitEmbedding(nn.Module):
         feats_tensor[:, 5, numberOfJobs:] = P
         feats_tensor[:, 6, numberOfJobs:] = N
 
-        feats_tensor[:, 7, :] = torch.tensor(numberOfJobs, device=device)
-        feats_tensor[:, 8, :] = torch.tensor(numberOfMachines, device=device)
+        feats_tensor[:, 7, :numberOfJobs] = torch.arange(start=1, end=numberOfJobs+1, device=device)
+        feats_tensor[:, 8, numberOfJobs:] = torch.arange(start=1, end=numberOfMachines+1, device=device)
 
         # feats_tensor.shape: [batch_size, numberOfJobs+numberOfMachines, 10]
         feats_tensor = feats_tensor.permute(0, 2, 1)
@@ -253,7 +255,7 @@ class NOMAInitEmbedding(nn.Module):
 #     def __init__(self, embed_dim, linear_bias=True):
 #         print("###NOMAInitEmbedding###")
 #         super(NOMAInitEmbedding, self).__init__()
-# 
+#
 #         encoder_layer = nn.TransformerEncoderLayer(d_model=numberOfJobs+numberOfMachines, nhead=2, dim_feedforward=128, dropout=0,
 #                                                    batch_first=True, layer_norm_eps=1e-5)
 #         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
@@ -262,28 +264,28 @@ class NOMAInitEmbedding(nn.Module):
 #                                      nn.LayerNorm(embed_dim, eps=1e-5),
 #                                      nn.LeakyReLU())
 #         self.linear = nn.Linear(7*embed_dim, (numberOfJobs*(numberOfJobs+numberOfMachines))*embed_dim, linear_bias)
-# 
+#
 #     def forward(self, td: TensorDict) -> torch.Tensor:
 #         # Input: td
 #         # Output: [batch_size, num_nodes, embed_dim]
-# 
+#
 #         device = td["Graph"].device
 #         bs = td.batch_size[0]
 #         self.to(device)
-# 
+#
 #         h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
 #         feats_tensor = torch.zeros((bs, 7, numberOfJobs+numberOfMachines), device=device)
-# 
+#
 #         feats_tensor[:, 0, numberOfJobs:] = 1
 #         feats_tensor[:, 1, :numberOfJobs] = 1
-# 
+#
 #         feats_tensor[:, 2, :numberOfJobs] = h
 #         feats_tensor[:, 3, :numberOfJobs] = L
-# 
+#
 #         feats_tensor[:, 4, numberOfJobs:] = W
 #         feats_tensor[:, 5, numberOfJobs:] = P
 #         feats_tensor[:, 6, numberOfJobs:] = N
-# 
+#
 #         encoder_output = self.linear(self.encoder(feats_tensor).reshape(bs, -1))
 #         return encoder_output.reshape(bs, numberOfJobs*(numberOfJobs+numberOfMachines), -1)
 
@@ -293,13 +295,11 @@ class NOMAContext(nn.Module):
         print("###NOMAContext###")
         super(NOMAContext, self).__init__()
 
-        self.for_embedding = nn.Sequential(nn.Linear(embed_dim, embed_dim, linear_bias),
-                                           nn.LayerNorm(embed_dim, eps=1e-5),
-                                           nn.LeakyReLU())
+        decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=8, batch_first=True,
+                                                   dim_feedforward=4*embed_dim, dropout=0)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=6)
 
         self.GNN = GraphNN(embed_dim=embed_dim)
-
-        self.linear = nn.Linear(embed_dim, embed_dim, linear_bias)
 
         self.embed_dim = embed_dim
         self.flag = False  # 标志初始化为False
@@ -310,16 +310,14 @@ class NOMAContext(nn.Module):
         # Output: [batch_size, embed_dim]
 
         device = td["Graph"].device
+        bs = embeddings.shape[0]
         self.to(device)
 
         # self.log_best_solution(td=td)
 
-        embeddings = embeddings.mean(dim=1)
-        embeddings = self.for_embedding(embeddings)
+        gnn_output = self.GNN(td)
 
-        gnn_output = self.GNN(td).mean(dim=1)
-
-        output = F.leaky_relu(self.linear(embeddings + gnn_output))
+        output = self.transformer_decoder(tgt=gnn_output, memory=embeddings).mean(dim=1)
 
         return output
 
