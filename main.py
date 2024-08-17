@@ -20,7 +20,7 @@ logger = WandbLogger(project="NOMA", config={"numberOfJobs": numberOfJobs,
 # logger = None
 
 env = NOMAenv()
-emb_dim = 128
+emb_dim = 256
 policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed since we are initializing the embeddings!
                               embed_dim=emb_dim,
                               init_embedding=NOMAInitEmbedding(emb_dim),
@@ -36,19 +36,21 @@ policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed s
 
 model = PPO(env,
             policy=policy,
-            train_data_size=128,
+            train_data_size=1024,
             val_data_size=128,
+            test_data_size=128,
             normalize_adv=False,
             ppo_epochs=3,
-            clip_range=0.1,
+            clip_range=0.2,
             critic=MyCriticNetwork(embed_dim=emb_dim),
-            critic_kwargs={"embed_dim": emb_dim})
+            critic_kwargs={"embed_dim": emb_dim},
+            optimizer_kwargs={"lr": 1e-6},)
 
 # Greedy rollouts over untrained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 td_init = env.reset(batch_size=BATCH_SIZE)
 policy = model.policy.to(device)
-# print(policy)
+print(policy)
 
 
 # out = policy(td_init.clone(), env, phase="test", decode_type="sampling", return_actions=True)
@@ -59,13 +61,14 @@ policy = model.policy.to(device)
 # for i in range(BATCH_SIZE):
 #     print(f"Problem {i+1} | Cost: {-rewards_untrained[i]:.4f}")
 
-trainer = RL4COTrainer(max_epochs=20, devices=1, logger=logger, log_every_n_steps=1)
+trainer = RL4COTrainer(max_epochs=60, devices=1, logger=logger, log_every_n_steps=1)
 # breakpoint()
 trainer.fit(model)
 
 out = policy(td_init.clone(), env, phase="test", return_actions=True, return_init_embeds=False)
 print(out)
 actions = out['actions']
+print(actions)
 print(f"""after policy: {env.step_to_end_from_actions(td_init.clone(), actions)["Graph"]}""")
 print(f"""best reward: {print_best_solution(td_init.clone())}""")
 
