@@ -123,11 +123,11 @@ if __name__ == '__main__':
     env = NOMAenv()
 
     td = env.reset(batch_size=[BATCH_SIZE])
-    # lst = find_best_solution(td)
-    # index = torch.zeros(4, 6).to(device)
-    #
-    # print(lst[0][str(index.tolist())])
+    lst = find_best_solution(td)
+    index = torch.zeros_like(td["Graph"][0]).to(device)
 
-    v, g = print_best_solution(td)
-    td.update({"Graph": g})
-    env.calculate_time_nodummy(td)
+    print(lst[0][str(index.tolist())])
+
+    # v, g = print_best_solution(td)
+    # td.update({"Graph": g})
+    # env.calculate_time_nodummy(td)
