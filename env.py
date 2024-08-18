@@ -17,16 +17,14 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.common.utils import Generator, get_sampler
 
 
-numberOfJobs = 6
-numberOfMachines = 2
-BATCH_SIZE = 2
+BATCH_SIZE = 4  # For testing
 reward_multiplicative_factor = 1000
-assert (numberOfJobs+numberOfMachines) % 2 == 0, "(numberOfJobs+numberOfMachines)需要是偶数！"
 
 
 def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
     """构建Time矩阵，下半部分全为0"""
     batch_size = jobList.shape[0]
+    numberOfJobs = jobList.shape[1]
     time_matrix = torch.zeros((batch_size, numberOfJobs, numberOfJobs))
     time_list = torch.zeros((batch_size, 1, numberOfJobs))
 
@@ -50,6 +48,8 @@ def mask(Graph: torch.Tensor) -> torch.Tensor:
     输入的Graph是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
     输出的mask是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
     """
+    numberOfJobs = Graph.shape[-2]
+    numberOfMachines = Graph.shape[-1] - numberOfJobs
     Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
     batch_size = Graph.shape[0]
     graph_shape = Graph.shape[1:]
@@ -71,7 +71,13 @@ def mask(Graph: torch.Tensor) -> torch.Tensor:
 
 
 def sample_env(batch_size: list) -> tuple:
-    batch_size = batch_size[0] if isinstance(batch_size, list) else batch_size
+    batch_size = batch_size[0] if isinstance(batch_size, (list, torch.Size)) else batch_size
+    numberOfJobs = random.randint(4, 5)
+    numberOfMachines = random.randint(2, 3)
+    # numberOfJobs = 4
+    # numberOfMachines = 2
+    print("sample_env: numberOfJobs:", numberOfJobs, "numberOfMachines:", numberOfMachines)
+
     def h_distribution():
         d = random.uniform(0.1, 0.5)
         tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
@@ -94,14 +100,11 @@ def sample_env(batch_size: list) -> tuple:
 
     N = torch.tensor([[(10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)] for _ in range(batch_size)])
     norm_N = norm_W.clone() / 5
-    return h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N
+    return h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines
 
 
-def action_to_tensor(Action: torch.Tensor) -> torch.Tensor:
-    # rowPosition = Action // (numberOfJobs + numberOfMachines)
-    # colPosition = Action % (numberOfJobs + numberOfMachines)
-    # actionTensor = torch.zeros((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
-    # actionTensor[torch.arange(Action.size(0)), rowPosition, colPosition] = 1
+def action_to_tensor(Action: torch.Tensor, numberOfJobs: torch.Tensor, numberOfMachines: torch.Tensor) -> torch.Tensor:
+    numberOfJobs, numberOfMachines = numberOfJobs[0], numberOfMachines[0]
     actionTensor = torch.zeros((Action.size(0), numberOfJobs*(numberOfJobs + numberOfMachines))).to(Action.device)
     actionTensor[torch.arange(Action.size(0)), Action] = 1
     return actionTensor.reshape((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
@@ -109,13 +112,14 @@ def action_to_tensor(Action: torch.Tensor) -> torch.Tensor:
 
 class NOMAGenerator(Generator):
     def __init__(self):
-        pass
+        super().__init__()
         # print("###Generator###")
 
-    def _generate(self, batch_size) -> TensorDict:
-        h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N = sample_env(batch_size=batch_size)
-        bs = batch_size[0] if isinstance(batch_size, list) else batch_size
-        Graph = torch.zeros((bs, numberOfJobs, numberOfJobs + numberOfMachines))
+    def _generate(self, batch_size, **kwargs) -> TensorDict:
+        # print("generate")
+        h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines = sample_env(batch_size=batch_size)
+        bs = batch_size[0] if isinstance(batch_size, (list, torch.Size)) else batch_size
+        Graph = torch.zeros((bs, numberOfJobs, numberOfJobs+numberOfMachines))
         jobList = torch.stack((h, L), dim=-1)
         T, T_list = build_time_matrix(jobList, W, P, N)
 
@@ -135,6 +139,8 @@ class NOMAGenerator(Generator):
                 "norm_W": norm_W,
                 "norm_P": norm_P,
                 "norm_N": norm_N,
+                "numberOfJobs": torch.tensor([numberOfJobs]).repeat(bs, 1),
+                "numberOfMachines": torch.tensor([numberOfMachines]).repeat(bs, 1),
             },
             batch_size=batch_size,
         )
@@ -165,7 +171,7 @@ class NOMAenv(RL4COEnvBase):
         action = td["action"]
         Graph = td["Graph"]
 
-        Graph += (mask(Graph)) * action_to_tensor(action)
+        Graph += (mask(Graph)) * action_to_tensor(action, td["numberOfJobs"], td["numberOfMachines"])
         available = mask(Graph)
         done = torch.sum(available.reshape(td.batch_size[0], -1), dim=(-1)) == 0
 
@@ -192,15 +198,9 @@ class NOMAenv(RL4COEnvBase):
         # print("###Reset###")
 
         init_Graph = td["Graph"] if td is not None else None
-        # if batch_size is None:
-        #     batch_size = self.batch_size if init_Graph is None else BATCH_SIZE
         device = init_Graph.device if init_Graph is not None else self.device
         self.to(device)
-        # if init_Graph is None:
-        #     bs = batch_size[0] if isinstance(batch_size, list) else batch_size
-        #     init_Graph = torch.zeros((bs, numberOfJobs*(numberOfJobs + numberOfMachines)))
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
-
         return TensorDict(
             {
                 "action_mask": mask(init_Graph).reshape(td.batch_size[0], -1),
@@ -211,18 +211,16 @@ class NOMAenv(RL4COEnvBase):
 
     def _make_spec(self, generator: NOMAGenerator):
         self.observation_spec = CompositeSpec(
-            Graph=BoundedTensorSpec(
-                low=0,
-                high=1,
-                shape=(numberOfJobs, numberOfJobs + numberOfMachines),
-                dtype=torch.int64,
+            Graph=UnboundedContinuousTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
             ),
             h=UnboundedContinuousTensorSpec(
-                shape=(numberOfJobs),
+                shape=(1),
                 dtype=torch.float32,
             ),
             L=UnboundedDiscreteTensorSpec(
-                shape=(numberOfJobs),
+                shape=(1),
                 dtype=torch.float32,
             ),
             W=UnboundedDiscreteTensorSpec(
@@ -238,11 +236,11 @@ class NOMAenv(RL4COEnvBase):
                 dtype=torch.float32,
             ),
             norm_h=UnboundedContinuousTensorSpec(
-                shape=(numberOfJobs),
+                shape=(1),
                 dtype=torch.float32,
             ),
             norm_L=UnboundedDiscreteTensorSpec(
-                shape=(numberOfJobs),
+                shape=(1),
                 dtype=torch.float32,
             ),
             norm_W=UnboundedDiscreteTensorSpec(
@@ -287,7 +285,9 @@ class NOMAenv(RL4COEnvBase):
 
     def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
-        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+        bs, numberOfJobs = T_list.shape[0], T_list.shape[-1]
+        Graph = Graph.reshape(bs, numberOfJobs, -1)
+        numberOfMachines = Graph.shape[-1] - numberOfJobs
         T = T.reshape(-1, numberOfJobs, numberOfJobs)
         T_list = T_list.reshape(-1, 1, numberOfJobs)
 
@@ -305,7 +305,8 @@ class NOMAenv(RL4COEnvBase):
 
     def calculate_time_dummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T_list = td["Graph"], td["T_list"]
-        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+        bs, numberOfJobs = T_list.shape[0], T_list.shape[-1]
+        Graph = Graph.reshape(bs, numberOfJobs, -1)
         T_list = T_list.reshape(-1, 1, numberOfJobs)
 
         row = torch.sum(Graph, dim=-1).reshape_as(T_list)
@@ -333,7 +334,6 @@ class NOMAenv(RL4COEnvBase):
 
 if __name__ == "__main__":
     env = NOMAenv()
-    env.reset(batch_size=[BATCH_SIZE])
     reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), random_policy)
     print(reward)
     print(td["Graph"])
