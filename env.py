@@ -117,11 +117,12 @@ def sample_env(batch_size: list) -> tuple:
 
 
 def action_to_tensor(Action: torch.Tensor, td: TensorDict) -> torch.Tensor:
+    device = Action.device
     max_job = td["max_job"][0].item()
     max_machine = td["max_machine"][0].item()
     valid_indices = Action != -1
-    actionTensor = torch.zeros((Action.size(0), max_job*(max_job+max_machine)), device=Action.device)
-    actionTensor[torch.arange(Action.size(0))[valid_indices], Action[valid_indices]] = 1
+    actionTensor = torch.zeros((Action.size(0), max_job*(max_job+max_machine)), device=device)
+    actionTensor[torch.arange(Action.size(0), device=device)[valid_indices], Action[valid_indices]] = 1
     return actionTensor.reshape((Action.size(0), max_job, max_job+max_machine))
 
 
@@ -230,8 +231,8 @@ class NOMAenv(RL4COEnvBase):
 
         return TensorDict(
             {
-                "action_mask": action_mask.reshape(batch_size[0], -1),
-                "golden_mask": action_mask.reshape(batch_size[0], -1),
+                "action_mask": action_mask.reshape(batch_size[0], -1).bool(),
+                "golden_mask": action_mask.reshape(batch_size[0], -1).bool(),
             },
             batch_size=batch_size,
         )
@@ -300,6 +301,16 @@ class NOMAenv(RL4COEnvBase):
         # print("reward", -self.calculate_time_dummy(td))
 
         return -self.calculate_time_dummy(td)
+
+    def get_action_mask(self, td: TensorDict) -> TensorDict:
+        Graph = td["Graph"]
+        action_mask = mask(Graph, td["golden_mask"]).reshape(td.batch_size[0], -1)
+        td.update(
+            {
+                "action_mask": action_mask.reshape(td.batch_size[0], -1),
+            },
+        )
+        return td
 
     def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
@@ -376,3 +387,4 @@ if __name__ == "__main__":
     print(td["Graph"])
     print("actions: ", actions)
     print(env.step_to_end_from_actions(td.clone(), actions)["reward"])
+
