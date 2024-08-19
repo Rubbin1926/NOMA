@@ -65,9 +65,7 @@ def mask(Graph: torch.Tensor, golden_mask: torch.Tensor) -> torch.Tensor:
     left = torch.where(left == 1, torch.tensor(1), torch.tensor(0))
     left = left.triu(diagonal=1)
     right -= row
-
     ret = (torch.cat((left, right), dim=2) * golden_mask.reshape_as(Graph)).bool()
-
     return ret
 
 def sample_env(batch_size: list) -> tuple:
@@ -228,6 +226,9 @@ class NOMAenv(RL4COEnvBase):
 
             action_mask[i, :_numberOfJobs, :_numberOfJobs] = left_part
             action_mask[i, :_numberOfJobs, max_job:max_job + _numberOfMachines] = right_part
+
+            if _numberOfJobs < max_job:
+                action_mask[i, _numberOfJobs:, -1] = 1
 
         return TensorDict(
             {
