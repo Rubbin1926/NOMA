@@ -17,24 +17,24 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.common.utils import Generator, get_sampler
 
 
-BATCH_SIZE = 4  # For testing
+BATCH_SIZE = 2  # For testing
 reward_multiplicative_factor = 1000
 
 
-def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
+def build_time_matrix(jobList, numberOfJobs, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
     """构建Time矩阵，下半部分全为0"""
     batch_size = jobList.shape[0]
-    numberOfJobs = jobList.shape[1]
-    time_matrix = torch.zeros((batch_size, numberOfJobs, numberOfJobs))
-    time_list = torch.zeros((batch_size, 1, numberOfJobs))
+    max_job = jobList.shape[1]
+    time_matrix = torch.zeros((batch_size, max_job, max_job))
+    time_list = torch.zeros((batch_size, 1, max_job))
 
     for i in range(batch_size):
-        for j in range(numberOfJobs):
+        for j in range(numberOfJobs[i].item()):
             R_OMA = W[i] * math.log(1 + jobList[i, j, 0] * P[i] / N[i])
             time_OMA = jobList[i, j, 1] / R_OMA
             time_matrix[i, j, j] = time_OMA
             time_list[i, 0, j] = time_OMA
-            for k in range(j + 1, numberOfJobs):
+            for k in range(j + 1, numberOfJobs[i].item()):
                 R_NOMA = W[i] * math.log(1 + jobList[i, j, 0] * P[i] / (jobList[i, k, 0] * P[i] + N[i]))
                 time_NOMA = jobList[i, k, 1] / R_NOMA
                 time_matrix[i, j, k] = max(time_NOMA, time_OMA)
@@ -42,10 +42,11 @@ def build_time_matrix(jobList, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
     return time_matrix, time_list
 
 
-def mask(Graph: torch.Tensor) -> torch.Tensor:
+def mask(Graph: torch.Tensor, golden_mask: torch.Tensor) -> torch.Tensor:
     """
     Return the mask of the graph
     输入的Graph是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+    torch.Tensor: 最初始的mask
     输出的mask是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
     """
     numberOfJobs = Graph.shape[-2]
@@ -65,18 +66,25 @@ def mask(Graph: torch.Tensor) -> torch.Tensor:
     left = left.triu(diagonal=1)
     right -= row
 
-    ret = torch.cat((left, right), dim=2).bool()
+    ret = (torch.cat((left, right), dim=2) * golden_mask.reshape_as(Graph)).bool()
 
     return ret
 
-
 def sample_env(batch_size: list) -> tuple:
     batch_size = batch_size[0] if isinstance(batch_size, (list, torch.Size)) else batch_size
-    numberOfJobs = random.randint(4, 5)
-    numberOfMachines = random.randint(2, 3)
-    # numberOfJobs = 4
-    # numberOfMachines = 2
-    print("sample_env: numberOfJobs:", numberOfJobs, "numberOfMachines:", numberOfMachines)
+
+    min_job_range, max_job_range = 3, 5
+    min_machine_range, max_machine_range = 2, 3
+
+    numberOfJobs = torch.tensor([[random.randint(min_job_range, max_job_range)] for _ in range(batch_size)])
+    numberOfMachines = torch.tensor([[random.randint(min_machine_range, max_machine_range)] for _ in range(batch_size)])
+    max_job = torch.max(numberOfJobs).item()
+    max_machine = torch.max(numberOfMachines).item()
+    # numberOfJobs = torch.tensor([8]).repeat(batch_size, 1)
+    # numberOfMachines = torch.tensor([2]).repeat(batch_size, 1)
+    print("sample_env: numberOfJobs:", numberOfJobs.flatten(),
+          "numberOfMachines:", numberOfMachines.flatten())
+    print("max_job:", max_job, "max_machine:", max_machine)
 
     def h_distribution():
         d = random.uniform(0.1, 0.5)
@@ -86,28 +94,35 @@ def sample_env(batch_size: list) -> tuple:
         return _h, d
 
     # h与d负相关
-    h_and_d = torch.tensor([sorted([h_distribution() for _ in range(numberOfJobs)], reverse=True, key=lambda x: x[0]) for _ in range(batch_size)])
+    h_and_d = torch.zeros((batch_size, max_job, 2))
+    for i in range(batch_size):
+        h_and_d[i, :numberOfJobs[i].item(), :] = torch.tensor([sorted([h_distribution() for _ in range(numberOfJobs[i].item())], reverse=True, key=lambda x: x[0])])
     h, norm_h = h_and_d[:, :, 0], h_and_d[:, :, 1]
 
-    L = torch.tensor(np.random.randint(1, 1024, size=(batch_size, numberOfJobs)).tolist())
-    norm_L = L / 200
+    L = torch.zeros((batch_size, max_job))
+    for i in range(batch_size):
+        L[i, :numberOfJobs[i].item()] = torch.tensor([random.randint(1, 1024) for _ in range(numberOfJobs[i].item())])
+    norm_L = L.clone() / 200
 
-    W = torch.tensor([[180 / numberOfMachines * 1000] for _ in range(batch_size)])
-    norm_W = W / 20000
+
+    W = torch.tensor([[180 / numberOfMachines[i].item() * 1000] for i in range(batch_size)])
+    norm_W = W.clone() / 20000
 
     P = torch.tensor([[0.1] for _ in range(batch_size)])
     norm_P = P.clone()
 
-    N = torch.tensor([[(10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines * 1000)] for _ in range(batch_size)])
+    N = torch.tensor([[(10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines[i].item() * 1000)] for i in range(batch_size)])
     norm_N = norm_W.clone() / 5
-    return h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines
+    return h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines, max_job, max_machine
 
 
-def action_to_tensor(Action: torch.Tensor, numberOfJobs: torch.Tensor, numberOfMachines: torch.Tensor) -> torch.Tensor:
-    numberOfJobs, numberOfMachines = numberOfJobs[0], numberOfMachines[0]
-    actionTensor = torch.zeros((Action.size(0), numberOfJobs*(numberOfJobs + numberOfMachines))).to(Action.device)
-    actionTensor[torch.arange(Action.size(0)), Action] = 1
-    return actionTensor.reshape((Action.size(0), numberOfJobs, numberOfJobs + numberOfMachines))
+def action_to_tensor(Action: torch.Tensor, td: TensorDict) -> torch.Tensor:
+    max_job = td["max_job"][0].item()
+    max_machine = td["max_machine"][0].item()
+    valid_indices = Action != -1
+    actionTensor = torch.zeros((Action.size(0), max_job*(max_job+max_machine)), device=Action.device)
+    actionTensor[torch.arange(Action.size(0))[valid_indices], Action[valid_indices]] = 1
+    return actionTensor.reshape((Action.size(0), max_job, max_job+max_machine))
 
 
 class NOMAGenerator(Generator):
@@ -117,11 +132,11 @@ class NOMAGenerator(Generator):
 
     def _generate(self, batch_size, **kwargs) -> TensorDict:
         # print("generate")
-        h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines = sample_env(batch_size=batch_size)
+        h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines, max_job, max_machine = sample_env(batch_size=batch_size)
         bs = batch_size[0] if isinstance(batch_size, (list, torch.Size)) else batch_size
-        Graph = torch.zeros((bs, numberOfJobs, numberOfJobs+numberOfMachines))
+        Graph = torch.zeros((bs, max_job, max_job+max_machine))
         jobList = torch.stack((h, L), dim=-1)
-        T, T_list = build_time_matrix(jobList, W, P, N)
+        T, T_list = build_time_matrix(jobList, numberOfJobs, W, P, N)
 
         return TensorDict(
             {
@@ -139,8 +154,10 @@ class NOMAGenerator(Generator):
                 "norm_W": norm_W,
                 "norm_P": norm_P,
                 "norm_N": norm_N,
-                "numberOfJobs": torch.tensor([numberOfJobs]).repeat(bs, 1),
-                "numberOfMachines": torch.tensor([numberOfMachines]).repeat(bs, 1),
+                "numberOfJobs": numberOfJobs,
+                "numberOfMachines": numberOfMachines,
+                "max_job": torch.tensor([max_job]).repeat(bs, 1),
+                "max_machine": torch.tensor([max_machine]).repeat(bs, 1),
             },
             batch_size=batch_size,
         )
@@ -167,14 +184,12 @@ class NOMAenv(RL4COEnvBase):
 
     def _step(self, td: TensorDict) -> TensorDict:
         # print("__________###Step###__________")
-
-        action = td["action"]
+        origin_action = td["action"]
+        tensor_action = action_to_tensor(origin_action, td)
         Graph = td["Graph"]
-
-        Graph += (mask(Graph)) * action_to_tensor(action, td["numberOfJobs"], td["numberOfMachines"])
-        available = mask(Graph)
+        Graph += tensor_action
+        available = mask(Graph, td["golden_mask"])
         done = torch.sum(available.reshape(td.batch_size[0], -1), dim=(-1)) == 0
-
         td.update(
             {
                 "Graph": Graph,
@@ -191,7 +206,6 @@ class NOMAenv(RL4COEnvBase):
                 "reward": reward,
             },
         )
-
         return td
 
     def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
@@ -201,9 +215,23 @@ class NOMAenv(RL4COEnvBase):
         device = init_Graph.device if init_Graph is not None else self.device
         self.to(device)
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+
+        action_mask = torch.zeros_like(init_Graph)
+        for i in range(batch_size[0]):
+            _numberOfJobs = td["numberOfJobs"][i].item()
+            _numberOfMachines = td["numberOfMachines"][i].item()
+            max_job = td["max_job"][i].item()
+
+            left_part = torch.ones((_numberOfJobs, _numberOfJobs), device=device).triu(diagonal=1)
+            right_part = torch.ones((_numberOfJobs, _numberOfMachines), device=device)
+
+            action_mask[i, :_numberOfJobs, :_numberOfJobs] = left_part
+            action_mask[i, :_numberOfJobs, max_job:max_job + _numberOfMachines] = right_part
+
         return TensorDict(
             {
-                "action_mask": mask(init_Graph).reshape(td.batch_size[0], -1),
+                "action_mask": action_mask.reshape(batch_size[0], -1),
+                "golden_mask": action_mask.reshape(batch_size[0], -1),
             },
             batch_size=batch_size,
         )
@@ -273,16 +301,6 @@ class NOMAenv(RL4COEnvBase):
 
         return -self.calculate_time_dummy(td)
 
-    def get_action_mask(self, td: TensorDict) -> TensorDict:
-        Graph = td["Graph"]
-        action_mask = mask(Graph).reshape(td.batch_size[0], -1)
-        td.update(
-            {
-                "action_mask": action_mask.reshape(td.batch_size[0], -1),
-            },
-        )
-        return td
-
     def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
         Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
         bs, numberOfJobs = T_list.shape[0], T_list.shape[-1]
@@ -318,9 +336,6 @@ class NOMAenv(RL4COEnvBase):
         return reward_multiplicative_factor * ret
 
     def step_to_end_from_actions(self, td: TensorDict, actions: torch.Tensor) -> TensorDict:
-        numberOfJobs = td["h"].shape[-1]
-        numberOfMachines = td["Graph"].shape[-1] - numberOfJobs
-
         zero_Graph = torch.zeros_like(td["Graph"])
         actions = actions.t()
         td.update({"Graph": zero_Graph})
@@ -331,12 +346,33 @@ class NOMAenv(RL4COEnvBase):
 
         return td
 
+    def next_mask(self, old_mask: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        # old_mask.shape: (batch_size, numberOfJobs*(numberOfJobs + numberOfMachines))
+        # action.shape: (batch_size, numberOfJobs, numberOfJobs + numberOfMachines)
+        # Output: (batch_size, numberOfJobs*(numberOfJobs + numberOfMachines))
+        action = action.reshape_as(old_mask)
+        return old_mask - action
+
 
 if __name__ == "__main__":
     env = NOMAenv()
-    reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), random_policy)
+
+
+    def my_random_policy(td):
+        """Helper function to select a random action from available actions or None if no action is available"""
+        action_mask = td["action_mask"].float()
+        actions = []
+        for mask in action_mask:
+            if mask.sum() == 0:
+                actions.append(-1)
+            else:
+                action = torch.multinomial(mask, 1).squeeze(-1)
+                actions.append(action.item())
+        td.set("action", torch.tensor(actions))
+        return td
+
+    reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), my_random_policy)
     print(reward)
     print(td["Graph"])
-    print(actions)
+    print("actions: ", actions)
     print(env.step_to_end_from_actions(td.clone(), actions)["reward"])
-
