@@ -52,10 +52,10 @@ def find(td, Dataset):
     numberOfJobs = td['T'].shape[-1]
     Graph = td['Graph'].reshape(numberOfJobs, -1)
     numberOfMachines = Graph.shape[-1] - numberOfJobs
-    Mask = mask(Graph).reshape_as(Graph)
+    Mask = mask(Graph, td["golden_mask"]).reshape_as(Graph)
 
     if torch.sum(Mask) == 0:
-        td_tmp = TensorDict({"Graph": Graph, "T": td["T"], "T_list": td["T_list"]})
+        td_tmp = TensorDict({"Graph": Graph, "T": td["T"], "T_list": td["T_list"], "golden_mask": td["golden_mask"]})
         Dataset[str(Graph.tolist())] = (torch.zeros_like(Graph),
                                         Graph,
                                         calculate_time_dummy(td_tmp, numberOfJobs, numberOfMachines))
@@ -70,7 +70,7 @@ def find(td, Dataset):
     mask_list = generate_mask_list(Mask)
 
     for action in mask_list:
-        td_tmp = TensorDict({"Graph": Graph+action, "T": td["T"], "T_list": td["T_list"]})
+        td_tmp = TensorDict({"Graph": Graph+action, "T": td["T"], "T_list": td["T_list"], "golden_mask": td["golden_mask"]})
         G_, V_ = find(td_tmp, Dataset)
         if V_ > V_star:
             V_star = V_
