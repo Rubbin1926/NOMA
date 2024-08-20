@@ -5,7 +5,6 @@ from torch import nn
 import torch.nn.functional as F
 import math
 from dgl.nn import EdgeGATConv
-from env import numberOfJobs, numberOfMachines
 from tensordict.tensordict import TensorDict
 from rl4co.models.rl.common.critic import CriticNetwork
 from rl4co.models.nn.env_embeddings.dynamic import StaticEmbedding
@@ -15,23 +14,28 @@ import wandb
 """
 TensorDict(
     fields={
-        Graph: Tensor(shape=torch.Size([2, 4, 6]), device=cpu, dtype=torch.float32, is_shared=False),
-        L: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.int64, is_shared=False),
+        Graph: Tensor(shape=torch.Size([2, 12, 17]), device=cpu, dtype=torch.float32, is_shared=False),
+        L: Tensor(shape=torch.Size([2, 12]), device=cpu, dtype=torch.float32, is_shared=False),
         N: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
         P: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
-        T: Tensor(shape=torch.Size([2, 4, 4]), device=cpu, dtype=torch.float32, is_shared=False),
-        T_list: Tensor(shape=torch.Size([2, 1, 4]), device=cpu, dtype=torch.float32, is_shared=False),
+        T: Tensor(shape=torch.Size([2, 12, 12]), device=cpu, dtype=torch.float32, is_shared=False),
+        T_list: Tensor(shape=torch.Size([2, 1, 12]), device=cpu, dtype=torch.float32, is_shared=False),
         W: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
         action: Tensor(shape=torch.Size([2]), device=cpu, dtype=torch.int64, is_shared=False),
-        action_mask: Tensor(shape=torch.Size([2, 24]), device=cpu, dtype=torch.bool, is_shared=False),
+        action_mask: Tensor(shape=torch.Size([2, 204]), device=cpu, dtype=torch.bool, is_shared=False),
         done: Tensor(shape=torch.Size([2]), device=cpu, dtype=torch.bool, is_shared=False),
-        h: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.float32, is_shared=False),
-        jobList: Tensor(shape=torch.Size([2, 4, 2]), device=cpu, dtype=torch.float32, is_shared=False),
-        norm_L: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.float32, is_shared=False),
+        golden_mask: Tensor(shape=torch.Size([2, 204]), device=cpu, dtype=torch.bool, is_shared=False),
+        h: Tensor(shape=torch.Size([2, 12]), device=cpu, dtype=torch.float32, is_shared=False),
+        jobList: Tensor(shape=torch.Size([2, 12, 2]), device=cpu, dtype=torch.float32, is_shared=False),
+        max_job: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.int64, is_shared=False),
+        max_machine: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.int64, is_shared=False),
+        norm_L: Tensor(shape=torch.Size([2, 12]), device=cpu, dtype=torch.float32, is_shared=False),
         norm_N: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
         norm_P: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
         norm_W: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.float32, is_shared=False),
-        norm_h: Tensor(shape=torch.Size([2, 4]), device=cpu, dtype=torch.float32, is_shared=False),
+        norm_h: Tensor(shape=torch.Size([2, 12]), device=cpu, dtype=torch.float32, is_shared=False),
+        numberOfJobs: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.int64, is_shared=False),
+        numberOfMachines: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.int64, is_shared=False),
         reward: Tensor(shape=torch.Size([2]), device=cpu, dtype=torch.float32, is_shared=False),
         terminated: Tensor(shape=torch.Size([2, 1]), device=cpu, dtype=torch.bool, is_shared=False)},
     batch_size=torch.Size([2]),
@@ -43,7 +47,7 @@ TensorDict(
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _tensor_to_dgl(Graph: torch.Tensor, numberOfJobs: int, numberOfMachines: int) -> dgl.DGLGraph:
+def _tensor_to_dgl(Graph: torch.Tensor, max_job: int, max_machine: int) -> dgl.DGLGraph:
     # 输入进来的tensor with batch是处理成方阵的Graph
     """
     用了dgl自带的batch函数
@@ -51,7 +55,7 @@ def _tensor_to_dgl(Graph: torch.Tensor, numberOfJobs: int, numberOfMachines: int
     经测试，与下文函数的结果经过dgl.nn后结果一致，并且此函数for循环导致速度更慢
     """
     graph_list = []
-    num_nodes = numberOfJobs+numberOfMachines
+    num_nodes = max_job+max_machine
     for i in range(Graph.shape[0]):
         DGLgraph = dgl.DGLGraph()
         DGLgraph.add_nodes(num_nodes)
@@ -62,13 +66,13 @@ def _tensor_to_dgl(Graph: torch.Tensor, numberOfJobs: int, numberOfMachines: int
     return dgl.batch(graph_list)
 
 
-def tensor_to_dgl(Graph: torch.Tensor, numberOfJobs: int, numberOfMachines: int) -> dgl.DGLGraph:
+def tensor_to_dgl(Graph: torch.Tensor, max_job: int, max_machine: int) -> dgl.DGLGraph:
     # 输入进来的tensor with batch是处理成方阵的Graph
-    num_nodes = Graph.shape[0] * (numberOfJobs+numberOfMachines)
+    num_nodes = Graph.shape[0] * (max_job+max_machine)
 
     # 处理为dgl接受的格式
     indices = torch.nonzero(Graph)
-    indices += (indices[:, 0] * (numberOfJobs+numberOfMachines)).reshape(indices.shape[0], 1)
+    indices += (indices[:, 0] * (max_job+max_machine)).reshape(indices.shape[0], 1)
     indices = indices[:, 1:].t().view(2, -1)
 
     DGLgraph = dgl.graph((indices[0], indices[1]), num_nodes=num_nodes)
@@ -95,7 +99,7 @@ class GraphNN(nn.Module):
 
     def forward(self, td: TensorDict) -> torch.Tensor:
         # td: td
-        # Output: [batch_size, numberOfJobs+numberOfMachines, embed_dim]
+        # Output: [batch_size, max_job+max_machine, embed_dim]
 
         device = td["Graph"].device
         self.to(device)
@@ -103,33 +107,43 @@ class GraphNN(nn.Module):
         # 使用手动Norm过的数据
         Graph, h, L, W, P, N = td["Graph"], td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
         bs = td.batch_size[0]
-        numberOfJobs = h.shape[-1]
-        numberOfMachines = Graph.shape[-1] - numberOfJobs
-        Graph = Graph.reshape(bs, numberOfJobs, numberOfJobs+numberOfMachines)
+        max_job = h.shape[-1]
+        max_machine = Graph.shape[-1] - max_job
+        numberOfJobs, numberOfMachines = td["numberOfJobs"], td["numberOfMachines"]
+        Graph = Graph.reshape(bs, max_job, max_job+max_machine)
 
-        square_Graph = torch.zeros(bs, numberOfJobs+numberOfMachines, numberOfJobs+numberOfMachines).to(device)
-        square_Graph[:, :numberOfJobs, :numberOfJobs + numberOfMachines] = Graph
-        dgl_Graph = tensor_to_dgl(square_Graph, numberOfJobs, numberOfMachines)
+        square_Graph = torch.zeros((bs, max_job+max_machine, max_job+max_machine), device=device)
+        square_Graph[:, :max_job, :max_job + max_machine] = Graph
+        dgl_Graph = tensor_to_dgl(square_Graph, max_job, max_machine)
 
-        # jobFeatures形状为 B*numberOfJobs*7(h_i,L_i,0,0,0,i,0)
+        # jobFeatures形状为 B*max_job*7(h_i,L_i,0,0,0,i,0)
         jobList = torch.stack((h, L), dim=-1)
-        jobID = torch.arange(start=1, end=numberOfJobs+1, device=device).unsqueeze(0).repeat(bs, 1).unsqueeze(-1)
-        jobWhitePart = torch.zeros((bs, numberOfJobs, 1), device=device)
+
+        jobID = torch.zeros((bs, max_job, 1), device=device)
+        indices = torch.arange(1, max_job + 1, device=device).unsqueeze(0).repeat(bs, 1)
+        _mask = torch.arange(max_job, device=device).unsqueeze(0) < numberOfJobs
+        jobID[:, :, 0] = indices * _mask
+
+        jobWhitePart = torch.zeros((bs, max_job, 1), device=device)
         jobFeatures = torch.cat((jobList, jobWhitePart, jobWhitePart, jobWhitePart, jobID, jobWhitePart), dim=-1)
 
-        # machineFeatures形状为 B*numberOfMachines*7(0,0,W_i,P_i,P_i,0,i)
-        WPNFeatures = torch.cat((W, P, N), dim=1).unsqueeze(1).repeat(1, numberOfMachines, 1)
-        machineID = torch.arange(start=1, end=numberOfMachines+1, device=device).unsqueeze(0).repeat(bs, 1).unsqueeze(-1)
-        machineWhitePart = torch.zeros((bs, numberOfMachines, 1), device=device)
+        # machineFeatures形状为 B*max_machine*7(0,0,W_i,P_i,P_i,0,i)
+        WPNFeatures = torch.cat((W, P, N), dim=1).unsqueeze(1).repeat(1, max_machine, 1)
+
+        machineID = torch.zeros((bs, max_machine, 1), device=device)
+        indices = torch.arange(1, max_machine + 1, device=device).unsqueeze(0).repeat(bs, 1)
+        _mask = torch.arange(max_machine, device=device).unsqueeze(0) < numberOfMachines
+        machineID[:, :, 0] = indices * _mask
+
+        machineWhitePart = torch.zeros((bs, max_machine, 1), device=device)
         machineFeatures = torch.cat((machineWhitePart, machineWhitePart, WPNFeatures, machineWhitePart, machineID), dim=-1)
 
         nodeFeatures = torch.cat((jobFeatures, machineFeatures), dim=1).reshape(-1, 7)
         # nodeFeatures = self.node_norm(nodeFeatures)
 
-
         # 先将T矩阵填充到G方阵大小，然后根据index直接取出对应的元素作为边的数值
         T_matrix = torch.zeros_like(square_Graph)
-        T_matrix[:, :numberOfJobs, :numberOfJobs] = td["T"]
+        T_matrix[:, :max_job, :max_job] = td["T"]
 
         edge_indices = torch.nonzero(square_Graph)
         batch_idx, row_idx, col_idx = edge_indices[:, 0], edge_indices[:, 1], edge_indices[:, 2]
@@ -145,7 +159,7 @@ class GraphNN(nn.Module):
         snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edgeFeatures)
         snd_time_node_feats = F.leaky_relu(snd_time_node_feats)
 
-        # conv_out.shape: [bs, numberOfJobs+numberOfMachines, embed_dim]
+        # conv_out.shape: [batch_size, max_job+max_machine, embed_dim]
         embed_dim = snd_time_node_feats.shape[-1]
         conv_out = snd_time_node_feats.mean(dim=1).reshape(bs, -1, embed_dim)
 
@@ -170,8 +184,6 @@ class MyCriticNetwork(CriticNetwork):
 
         device = td["Graph"].device
         bs = td.batch_size[0]
-        numberOfJobs = td["h"].shape[-1]
-        numberOfMachines = td["Graph"].shape[-1] - numberOfJobs
         self.to(device)
 
         gnn_output = self.GNN(td)
@@ -179,24 +191,6 @@ class MyCriticNetwork(CriticNetwork):
         output, _ = torch.min(output, dim=-1)
 
         return output.reshape(bs, -1)
-
-
-# class NOMAInitEmbedding(nn.Module):
-#     def __init__(self, embed_dim, linear_bias=True):
-#         print("###NOMAInitEmbedding###")
-#         super(NOMAInitEmbedding, self).__init__()
-#
-#         self.GNN = GraphNN(embed_dim=embed_dim)
-#
-#     def forward(self, td: TensorDict):
-#         # Input: td
-#         # Output: [batch_size, num_nodes, embed_dim]
-#
-#         device = td["Graph"].device
-#         self.to(device)
-#
-#         gnn_output = self.GNN(td)
-#         return gnn_output.repeat(1, numberOfJobs, 1)
 
 
 class NOMAInitEmbedding(nn.Module):
@@ -226,68 +220,39 @@ class NOMAInitEmbedding(nn.Module):
         self.to(device)
 
         h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
-        numberOfJobs = h.shape[-1]
-        numberOfMachines = td["Graph"].shape[-1] - numberOfJobs
+        max_job = h.shape[-1]
+        max_machine = td["Graph"].shape[-1] - max_job
+        numberOfJobs, numberOfMachines = td["numberOfJobs"], td["numberOfMachines"]
 
-        feats_tensor = torch.zeros((bs, 10, numberOfJobs+numberOfMachines), device=device)
+        feats_tensor = torch.zeros((bs, 10, max_job+max_machine), device=device)
 
-        feats_tensor[:, 0, numberOfJobs:] = 1
-        feats_tensor[:, 1, :numberOfJobs] = 1
+        feats_tensor[:, 0, max_job:] = 1
+        feats_tensor[:, 1, :max_job] = 1
 
-        feats_tensor[:, 2, :numberOfJobs] = h
-        feats_tensor[:, 3, :numberOfJobs] = L
+        feats_tensor[:, 2, :max_job] = h
+        feats_tensor[:, 3, :max_job] = L
 
-        feats_tensor[:, 4, numberOfJobs:] = W
-        feats_tensor[:, 5, numberOfJobs:] = P
-        feats_tensor[:, 6, numberOfJobs:] = N
+        feats_tensor[:, 4, max_job:] = W
+        feats_tensor[:, 5, max_job:] = P
+        feats_tensor[:, 6, max_job:] = N
 
-        feats_tensor[:, 7, :numberOfJobs] = torch.arange(start=1, end=numberOfJobs+1, device=device)
-        feats_tensor[:, 8, numberOfJobs:] = torch.arange(start=1, end=numberOfMachines+1, device=device)
+        jobID = torch.zeros((bs, 1, max_job), device=device)
+        indices = torch.arange(1, max_job + 1, device=device).unsqueeze(0).repeat(bs, 1)
+        _mask = torch.arange(max_job, device=device).unsqueeze(0) < numberOfJobs
+        jobID[:, 0, :] = indices * _mask
+        feats_tensor[:, 7, :max_job] = jobID.reshape(bs, max_job)
 
-        # feats_tensor.shape: [batch_size, numberOfJobs+numberOfMachines, 10]
+        machineID = torch.zeros((bs, 1, max_machine), device=device)
+        indices = torch.arange(1, max_machine + 1, device=device).unsqueeze(0).repeat(bs, 1)
+        _mask = torch.arange(max_machine, device=device).unsqueeze(0) < numberOfMachines
+        machineID[:, 0, :] = indices * _mask
+        feats_tensor[:, 8, max_job:] = machineID.reshape(bs, max_machine)
+
+        # feats_tensor.shape: [batch_size, max_job+max_machine, 10]
         feats_tensor = feats_tensor.permute(0, 2, 1)
 
-        encoder_output = self.encoder(feats_tensor).repeat(1, numberOfJobs, 1)
+        encoder_output = self.encoder(feats_tensor).repeat(1, max_job, 1)
         return self.linear(encoder_output)
-
-
-# class NOMAInitEmbedding(nn.Module):
-#     def __init__(self, embed_dim, linear_bias=True):
-#         print("###NOMAInitEmbedding###")
-#         super(NOMAInitEmbedding, self).__init__()
-#
-#         encoder_layer = nn.TransformerEncoderLayer(d_model=numberOfJobs+numberOfMachines, nhead=2, dim_feedforward=128, dropout=0,
-#                                                    batch_first=True, layer_norm_eps=1e-5)
-#         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
-#         self.encoder = nn.Sequential(transformer_encoder,
-#                                      nn.Linear(numberOfJobs+numberOfMachines, embed_dim, linear_bias),
-#                                      nn.LayerNorm(embed_dim, eps=1e-5),
-#                                      nn.LeakyReLU())
-#         self.linear = nn.Linear(7*embed_dim, (numberOfJobs*(numberOfJobs+numberOfMachines))*embed_dim, linear_bias)
-#
-#     def forward(self, td: TensorDict) -> torch.Tensor:
-#         # Input: td
-#         # Output: [batch_size, num_nodes, embed_dim]
-#
-#         device = td["Graph"].device
-#         bs = td.batch_size[0]
-#         self.to(device)
-#
-#         h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
-#         feats_tensor = torch.zeros((bs, 7, numberOfJobs+numberOfMachines), device=device)
-#
-#         feats_tensor[:, 0, numberOfJobs:] = 1
-#         feats_tensor[:, 1, :numberOfJobs] = 1
-#
-#         feats_tensor[:, 2, :numberOfJobs] = h
-#         feats_tensor[:, 3, :numberOfJobs] = L
-#
-#         feats_tensor[:, 4, numberOfJobs:] = W
-#         feats_tensor[:, 5, numberOfJobs:] = P
-#         feats_tensor[:, 6, numberOfJobs:] = N
-#
-#         encoder_output = self.linear(self.encoder(feats_tensor).reshape(bs, -1))
-#         return encoder_output.reshape(bs, numberOfJobs*(numberOfJobs+numberOfMachines), -1)
 
 
 class NOMAContext(nn.Module):
@@ -310,7 +275,6 @@ class NOMAContext(nn.Module):
         # Output: [batch_size, embed_dim]
 
         device = td["Graph"].device
-        bs = embeddings.shape[0]
         self.to(device)
 
         # self.log_best_solution(td=td)
@@ -318,7 +282,6 @@ class NOMAContext(nn.Module):
         gnn_output = self.GNN(td)
 
         output = self.transformer_decoder(tgt=gnn_output, memory=embeddings).mean(dim=1)
-
         return output
 
     def log_best_solution(self, td: TensorDict):
