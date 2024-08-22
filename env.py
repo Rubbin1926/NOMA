@@ -17,8 +17,8 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.common.utils import Generator, get_sampler
 
 
-BATCH_SIZE = 2  # For testing
-reward_multiplicative_factor = 1000
+BATCH_SIZE = 8  # For testing
+reward_multiplicative_factor = 500
 
 
 def build_time_matrix(jobList, numberOfJobs, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
@@ -71,17 +71,19 @@ def mask(Graph: torch.Tensor, golden_mask: torch.Tensor) -> torch.Tensor:
 def sample_env(batch_size: list) -> tuple:
     batch_size = batch_size[0] if isinstance(batch_size, (list, torch.Size)) else batch_size
 
-    min_job_range, max_job_range = 3, 5
-    min_machine_range, max_machine_range = 2, 3
+    min_job_range, max_job_range = 2, 10
+    min_machine_range, max_machine_range = 2, 6
 
     numberOfJobs = torch.tensor([[random.randint(min_job_range, max_job_range)] for _ in range(batch_size)])
     numberOfMachines = torch.tensor([[random.randint(min_machine_range, max_machine_range)] for _ in range(batch_size)])
-    max_job = torch.max(numberOfJobs).item()
-    max_machine = torch.max(numberOfMachines).item()
+    max_job = max_job_range
+    max_machine = max_machine_range
+    # max_job = torch.max(numberOfJobs).item()
+    # max_machine = torch.max(numberOfMachines).item()
     # numberOfJobs = torch.tensor([8]).repeat(batch_size, 1)
     # numberOfMachines = torch.tensor([2]).repeat(batch_size, 1)
-    print("sample_env: numberOfJobs:", numberOfJobs.flatten(),
-          "numberOfMachines:", numberOfMachines.flatten())
+    print("sample_env: numberOfJobs:", numberOfJobs.flatten().shape,
+          "numberOfMachines:", numberOfMachines.flatten().shape)
     print("max_job:", max_job, "max_machine:", max_machine)
 
     def h_distribution():
@@ -161,6 +163,9 @@ class NOMAGenerator(Generator):
             batch_size=batch_size,
         )
 
+    def generate(self, batch_size, **kwargs):
+        return self._generate(batch_size, **kwargs)
+
 
 class NOMAenv(RL4COEnvBase):
     """NOMA environment"""
@@ -208,12 +213,14 @@ class NOMAenv(RL4COEnvBase):
         return td
 
     def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
-        # print("###Reset###")
+        print("###Reset###")
 
         init_Graph = td["Graph"] if td is not None else None
         device = init_Graph.device if init_Graph is not None else self.device
         self.to(device)
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+
+        td = self.generator.generate(batch_size=batch_size)
 
         action_mask = torch.zeros_like(init_Graph)
         for i in range(batch_size[0]):
@@ -230,13 +237,12 @@ class NOMAenv(RL4COEnvBase):
             if _numberOfJobs < max_job:
                 action_mask[i, _numberOfJobs:, -1] = 1
 
-        return TensorDict(
-            {
+        td.update({
                 "action_mask": action_mask.reshape(batch_size[0], -1).bool(),
                 "golden_mask": action_mask.reshape(batch_size[0], -1).bool(),
-            },
-            batch_size=batch_size,
-        )
+            },)
+
+        return td
 
 
     def _make_spec(self, generator: NOMAGenerator):
@@ -385,7 +391,7 @@ if __name__ == "__main__":
 
     reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), my_random_policy)
     print(reward)
-    print(td["Graph"])
+    print(td)
     print("actions: ", actions)
     print(env.step_to_end_from_actions(td.clone(), actions)["reward"])
 
