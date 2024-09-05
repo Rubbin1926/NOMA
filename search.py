@@ -1,7 +1,7 @@
 from tensordict.tensordict import TensorDict
 import torch
-from env import NOMAenv, mask, reward_multiplicative_factor
-
+from env import NOMAenv, reward_multiplicative_factor
+mask = NOMAenv.NOMA_mask
 
 def calculate_time_nodummy(td: TensorDict, numberOfJobs, numberOfMachines) -> torch.Tensor:
     Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
