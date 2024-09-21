@@ -198,11 +198,11 @@ class NOMAInitEmbedding(nn.Module):
         print("###NOMAInitEmbedding###")
         super(NOMAInitEmbedding, self).__init__()
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=10, nhead=5, dim_feedforward=128, dropout=0,
+        encoder_layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, dim_feedforward=128, dropout=0,
                                                    batch_first=True, layer_norm_eps=1e-5)
-        transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=6)
+        transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
         self.encoder = nn.Sequential(transformer_encoder,
-                                     nn.Linear(10, embed_dim, linear_bias),
+                                     nn.Linear(8, embed_dim, linear_bias),
                                      nn.LayerNorm(embed_dim, eps=1e-5),
                                      nn.LeakyReLU())
 
@@ -220,38 +220,71 @@ class NOMAInitEmbedding(nn.Module):
         self.to(device)
 
         h, L, W, P, N = td["norm_h"], td["norm_L"], td["norm_W"], td["norm_P"], td["norm_N"]
+        # h, L: B * max_job
+        # W, P, N: B * 1
         max_job = h.shape[-1]
         max_machine = td["Graph"].shape[-1] - max_job
         numberOfJobs, numberOfMachines = td["numberOfJobs"], td["numberOfMachines"]
 
-        feats_tensor = torch.zeros((bs, 10, max_job+max_machine), device=device)
+        feats_tensor = torch.zeros((bs, 8, (max_job+max_machine)*max_job), device=device)
 
-        feats_tensor[:, 0, max_job:] = 1
-        feats_tensor[:, 1, :max_job] = 1
+        first_line = h.clone().unsqueeze(2).repeat(1, 1, max_job)
+        first_line_zero = torch.zeros((bs, max_job, max_machine), device=device)
+        first_line = torch.cat([first_line, first_line_zero], dim=2).view(bs, -1)
+        # B*[h1, ..., h1, 0, ..., 0, h2, ..., h2, 0, ..., 0, ..., h_max_job, ..., h_max_job, 0, ..., 0]
 
-        feats_tensor[:, 2, :max_job] = h
-        feats_tensor[:, 3, :max_job] = L
+        feats_tensor[:, 0, :] = first_line
 
-        feats_tensor[:, 4, max_job:] = W
-        feats_tensor[:, 5, max_job:] = P
-        feats_tensor[:, 6, max_job:] = N
+        second_line = L.clone().unsqueeze(2).repeat(1, 1, max_job)
+        second_line_zero = torch.zeros((bs, max_job, max_machine), device=device)
+        second_line = torch.cat([second_line, second_line_zero], dim=2).view(bs, -1)
+        # B*[L1, ..., L1, 0, ..., 0, L2, ..., L2, 0, ..., 0, ..., L_max_job, ..., L_max_job, 0, ..., 0]
 
-        jobID = torch.zeros((bs, 1, max_job), device=device)
-        indices = torch.arange(1, max_job + 1, device=device).unsqueeze(0).repeat(bs, 1)
-        _mask = torch.arange(max_job, device=device).unsqueeze(0) < numberOfJobs
-        jobID[:, 0, :] = indices * _mask
-        feats_tensor[:, 7, :max_job] = jobID.reshape(bs, max_job)
+        feats_tensor[:, 1, :] = second_line
 
-        machineID = torch.zeros((bs, 1, max_machine), device=device)
-        indices = torch.arange(1, max_machine + 1, device=device).unsqueeze(0).repeat(bs, 1)
-        _mask = torch.arange(max_machine, device=device).unsqueeze(0) < numberOfMachines
-        machineID[:, 0, :] = indices * _mask
-        feats_tensor[:, 8, max_job:] = machineID.reshape(bs, max_machine)
+        third_line = h.clone()
+        third_line_zero = torch.zeros((bs, max_machine), device=device)
+        third_line = torch.cat([third_line, third_line_zero], dim=1).repeat(1, max_job)
+        # B*[h1, h2, ..., h_max_job, 0, ..., 0, h1, ..., 0, ..., h_max_job, 0, ..., 0]
 
-        # feats_tensor.shape: [batch_size, max_job+max_machine, 10]
+        feats_tensor[:, 2, :] = third_line
+
+        forth_line = L.clone()
+        forth_line_zero = torch.zeros((bs, max_machine), device=device)
+        forth_line = torch.cat([forth_line, forth_line_zero], dim=1).repeat(1, max_job)
+        # # B*[L1, L2, ..., L_max_job, 0, ..., 0, L1, ..., 0, ..., L_max_job, 0, ..., 0]
+
+        feats_tensor[:, 3, :] = forth_line
+
+        fifth_line = W.clone().repeat(1, max_machine)
+        fifth_line_zero = torch.zeros((bs, max_job), device=device)
+        fifth_line = torch.cat([fifth_line_zero, fifth_line], dim=1).repeat(1, max_job)
+        # B*[0, ..., 0, W, ..., W, 0, ..., 0, ..., 0, W, ..., W, 0, ..., 0]
+
+        feats_tensor[:, 4, :] = fifth_line
+
+        sixth_line = P.clone().repeat(1, max_machine)
+        sixth_line_zero = torch.zeros((bs, max_job), device=device)
+        sixth_line = torch.cat([sixth_line_zero, sixth_line], dim=1).repeat(1, max_job)
+        # B*[0, ..., 0, P, ..., P, 0, ..., 0, ..., 0, P, ..., P, 0, ..., 0]
+
+        feats_tensor[:, 5, :] = sixth_line
+
+        seventh_line = N.clone().repeat(1, max_machine)
+        seventh_line_zero = torch.zeros((bs, max_job), device=device)
+        seventh_line = torch.cat([seventh_line_zero, seventh_line], dim=1).repeat(1, max_job)
+        # B*[0, ..., 0, N, ..., N, 0, ..., 0, ..., 0, N, ..., N, 0, ..., 0]
+
+        feats_tensor[:, 6, :] = seventh_line
+
+        eighth_line = torch.arange(start=1, end=max_job*(max_job+max_machine)+1, device=device)
+        # B*[1, 2, ..., max_job*(max_job+max_machine)]
+
+        feats_tensor[:, 7, :] = eighth_line
+
         feats_tensor = feats_tensor.permute(0, 2, 1)
+        encoder_output = self.encoder(feats_tensor)
 
-        encoder_output = self.encoder(feats_tensor).repeat(1, max_job, 1)
         return self.linear(encoder_output)
 
 
@@ -262,7 +295,7 @@ class NOMAContext(nn.Module):
 
         decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=8, batch_first=True,
                                                    dim_feedforward=4*embed_dim, dropout=0)
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=6)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
 
         self.GNN = GraphNN(embed_dim=embed_dim)
 
