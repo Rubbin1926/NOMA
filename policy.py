@@ -87,11 +87,11 @@ class GraphNN(nn.Module):
 
         num_heads = 5
 
-        self.conv0 = EdgeGATConv(in_feats=7, edge_feats=1, out_feats=16,
+        self.conv0 = EdgeGATConv(in_feats=7, edge_feats=1, out_feats=32,
                                  num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv1 = EdgeGATConv(in_feats=16, edge_feats=1, out_feats=64,
+        self.conv1 = EdgeGATConv(in_feats=32, edge_feats=1, out_feats=128,
                                  num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv2 = EdgeGATConv(in_feats=64, edge_feats=1, out_feats=embed_dim,
+        self.conv2 = EdgeGATConv(in_feats=128, edge_feats=1, out_feats=embed_dim,
                                  num_heads=num_heads, allow_zero_in_degree=True)
 
         # self.node_norm = nn.LayerNorm(5, eps=1e-5)
@@ -158,12 +158,12 @@ class GraphNN(nn.Module):
 
         snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edgeFeatures)
         snd_time_node_feats = F.leaky_relu(snd_time_node_feats)
+        # shape = [batch_size*(max_job+max_machine), num_heads, embed_dim]
 
-        # conv_out.shape: [batch_size, max_job+max_machine, embed_dim]
         embed_dim = snd_time_node_feats.shape[-1]
-        conv_out = snd_time_node_feats.mean(dim=1).reshape(bs, -1, embed_dim)
+        output = self.linear(snd_time_node_feats.reshape(bs*(max_job+max_machine), -1))
 
-        return conv_out
+        return output.reshape(bs, max_job+max_machine, embed_dim)
 
 
 class MyCriticNetwork(CriticNetwork):
