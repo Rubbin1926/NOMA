@@ -188,7 +188,7 @@ class MyCriticNetwork(CriticNetwork):
 
         gnn_output = self.GNN(td)
         output = self.linear(gnn_output).reshape(bs, -1)
-        output, _ = torch.min(output, dim=-1)
+        output = torch.mean(output, dim=-1)
 
         return output.reshape(bs, -1)
 
@@ -198,8 +198,8 @@ class NOMAInitEmbedding(nn.Module):
         print("###NOMAInitEmbedding###")
         super(NOMAInitEmbedding, self).__init__()
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, dim_feedforward=128, dropout=0,
-                                                   batch_first=True, layer_norm_eps=1e-5)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, dim_feedforward=4*embed_dim,
+                                                   batch_first=True, layer_norm_eps=1e-5, dropout=0)
         transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
         self.encoder = nn.Sequential(transformer_encoder,
                                      nn.Linear(8, embed_dim, linear_bias),
@@ -293,8 +293,8 @@ class NOMAContext(nn.Module):
         print("###NOMAContext###")
         super(NOMAContext, self).__init__()
 
-        decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=8, batch_first=True,
-                                                   dim_feedforward=4*embed_dim, dropout=0)
+        decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=8, dim_feedforward=4*embed_dim,
+                                                   batch_first=True, layer_norm_eps=1e-5, dropout=0)
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
 
         self.GNN = GraphNN(embed_dim=embed_dim)
