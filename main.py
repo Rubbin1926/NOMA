@@ -13,19 +13,23 @@ from rl4co.models.zoo import AttentionModel, AttentionModelPolicy
 from rl4co.models.zoo.symnco.policy import SymNCOPolicy
 from rl4co.models.rl import PPO
 from rl4co.utils.trainer import RL4COTrainer
+
+from myPolicy import *
     
 wandb.login(key="a92a309a25837dfaeac912d8a533448c9bb7399a")
 logger = WandbLogger(project="NOMA", config={"Env": "OMA", })
 # logger = None
 
 env = OMAenv()
-emb_dim = 512
-policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed since we are initializing the embeddings!
-                              embed_dim=emb_dim,
-                              init_embedding=NOMAInitEmbedding(emb_dim),
-                              context_embedding=NOMAContext(emb_dim),
-                              dynamic_embedding=NOMADynamicEmbedding(emb_dim),
-                              check_nan=True,)
+emb_dim = 256
+# policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed since we are initializing the embeddings!
+#                               embed_dim=emb_dim,
+#                               init_embedding=NOMAInitEmbedding(emb_dim),
+#                               context_embedding=NOMAContext(emb_dim),
+#                               dynamic_embedding=NOMADynamicEmbedding(emb_dim),
+#                               check_nan=True,)
+
+policy = GNNPolicy(NOMANet=NOMANet(embed_dim=emb_dim))
 
 model = PPO(env,
             policy=policy,
@@ -51,7 +55,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 policy = model.policy.to(device)
 # print(policy)
 
-checkpoint_callback = [ModelCheckpoint(dirpath="checkpoints/OMA_GNN_try",
+checkpoint_callback = [ModelCheckpoint(dirpath="checkpoints/OMA_my_policy",
                                        filename=None,  # save as {epoch}-{step}.ckpt
                                        save_top_k=1,
                                        save_last=True,  # save the last model
@@ -59,7 +63,7 @@ checkpoint_callback = [ModelCheckpoint(dirpath="checkpoints/OMA_GNN_try",
                                        mode="max")]  # maximize validation reward
 # checkpoint_callback = None
 
-trainer = RL4COTrainer(max_epochs=300, devices=1, logger=logger, log_every_n_steps=1, callbacks=checkpoint_callback)
+trainer = RL4COTrainer(max_epochs=200, devices=1, logger=logger, log_every_n_steps=1, callbacks=checkpoint_callback)
 trainer.fit(model)
 
 # td_init = env.reset(batch_size=BATCH_SIZE)
