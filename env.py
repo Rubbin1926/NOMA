@@ -1,145 +1,856 @@
-from env import NOMAenv, OMAenv, BATCH_SIZE
-from policy import NOMAInitEmbedding, NOMAContext, NOMADynamicEmbedding, MyCriticNetwork
-from search import print_best_solution
-import wandb
-from lightning.pytorch.loggers import WandbLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, RichModelSummary
-
+from typing import Optional, Iterable
 import torch
-import pickle
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import random
+import math
+import time
 
+from hydra.core.override_parser.types import Override
+from tensordict.tensordict import TensorDict
+from torchrl.data import (
+    BoundedTensorSpec,
+    CompositeSpec,
+    UnboundedContinuousTensorSpec,
+    UnboundedDiscreteTensorSpec,
+)
 from rl4co.utils.decoding import rollout, random_policy
-from rl4co.models.zoo import AttentionModel, AttentionModelPolicy
-from rl4co.models.zoo.symnco.policy import SymNCOPolicy
-from rl4co.models.rl import PPO
-from rl4co.utils.trainer import RL4COTrainer
+from rl4co.envs.common.base import RL4COEnvBase
+from rl4co.envs.common.utils import Generator
+from rl4co.data.utils import save_tensordict_to_npz, load_npz_to_tensordict
 
-from myPolicy import *
-from myPPO import myPPO
-from mySupervisedLearning import mySupervisedLearning
-from LPT import *
+from rl4co.utils.pylogger import get_pylogger
 
-# vim ~/miniconda3/envs/NOMA/lib/python3.9/site-packages/rl4co/models/rl/ppo/ppo.py
+from LPT import LPTPolicy, NOMA_LPT_NET, LPT_td
 
-# def load(path):
-#     with open(path, 'rb') as f:
-#         loaded_list = pickle.load(f)
-#         return loaded_list
-# lst = load("./record/lyu.pkl")
-# lst = []
-# with open("./record/lyu.pkl", 'wb') as f:
-#     pickle.dump(lst, f)
+log = get_pylogger(__name__)
+
+
+BATCH_SIZE = 2  # For testing
+reward_multiplicative_factor = 500
+
+
+def find_optimal_power(h_i, h_j, L_i, L_j, P, N, tolerance=1e-6, max_iterations=1000):
+    """
+    求解方程 (1 + h_j * p_j / n)^L_i = (1 + h_i * P / (h_j * p_j + n))^L_j 的根
+
+    参数:
+        h_j, h_i: 信道参数
+        P: 最大功率限制
+        n: 噪声功率
+        L_i, L_j: 指数参数
+        tolerance: 解的容差
+        max_iterations: 最大迭代次数
+
+    返回:
+        在[0, P]区间内的解p_j，如果没有解则返回P
+    """
+
+    def equation(p_j):
+        # 使用对数变换避免数值溢出
+        try:
+            left = L_i * math.log(1 + h_j * p_j / N)
+            right = L_j * math.log(1 + h_i * P / (h_j * p_j + N))
+            return left - right
+        except ValueError:
+            # 如果对数参数无效，返回一个大的数值
+            return float('inf')
+
+    # 检查端点
+    low = 1e-20  # 避免除以零或对数负数
+    high = P
+
+    f_low = equation(low)
+    f_high = equation(high)
+
+    # 检查是否有解（函数值在端点异号）
+    if f_low * f_high > 0:
+        return P  # 无解，返回P
+
+    # 二分查找
+    for _ in range(max_iterations):
+        mid = (low + high) / 2
+        f_mid = equation(mid)
+
+        if abs(f_mid) < tolerance:
+            return mid
+
+        if f_mid * f_low < 0:
+            high = mid
+            f_high = f_mid
+        else:
+            low = mid
+            f_low = f_mid
+
+    return (low + high) / 2  # 返回最后一次的中间值
+
+
+def build_time_matrix(jobList, numberOfJobs, W, P, N) -> tuple[torch.Tensor, torch.Tensor]:
+    """构建Time矩阵，下半部分全为0"""
+    batch_size = jobList.shape[0]
+    max_job = jobList.shape[1]
+    time_matrix = torch.zeros((batch_size, max_job, max_job))
+    time_list = torch.zeros((batch_size, 1, max_job))
+
+    for i in range(batch_size):
+        for j in range(numberOfJobs[i].item()):
+            R_OMA = W[i] * math.log(1 + jobList[i, j, 0] * P[i] / N[i], 2)
+            time_OMA = jobList[i, j, 1] / R_OMA
+            time_matrix[i, j, j] = time_OMA
+            time_list[i, 0, j] = time_OMA
+            for k in range(j + 1, numberOfJobs[i].item()):
+                h_j, h_k, L_j, L_k= jobList[i, j, 0].item(), jobList[i, k, 0].item(), jobList[i, j, 1].item(), jobList[i, k, 1].item()
+                P_jk, N_jk = P[i].item(), N[i].item()
+
+                P_k_optimal = find_optimal_power(h_j, h_k, L_j, L_k, P_jk, N_jk)
+
+                R_j = W[i] * math.log(1 + h_j * P_jk / (h_k * P_k_optimal + N_jk), 2)
+                R_k = W[i] * math.log(1 + h_k * P_k_optimal / N_jk, 2)
+                T_j = jobList[i, j, 1] / R_j
+                T_k = jobList[i, k, 1] / R_k
+
+                T_jk = max(T_j, T_k)
+                # print(T_jk)
+
+
+                P_j_optimal = find_optimal_power(h_k, h_j, L_k, L_j, P_jk, N_jk)
+
+                R_k = W[i] * math.log(1 + h_k * P_jk / (h_j * P_j_optimal + N_jk), 2)
+                R_j = W[i] * math.log(1 + h_j * P_j_optimal / N_jk, 2)
+                T_k = jobList[i, k, 1] / R_k
+                T_j = jobList[i, j, 1] / R_j
+
+                T_kj = max(T_j, T_k)
+                # print(T_kj)
+
+
+
+                # R_NOMA_j = W[i] * math.log(1 + jobList[i, j, 0] * P[i] / (jobList[i, k, 0] * P[i] + N[i]), 2)
+                # time_NOMA_j = jobList[i, j, 1] / R_NOMA_j
+                # R_OMA_k = W[i] * math.log(1 + jobList[i, k, 0] * P[i] / N[i], 2)
+                # time_OMA_k = jobList[i, k, 1] / R_OMA_k
+                # T_jk = max(time_NOMA_j, time_OMA_k)
+                #
+                # R_NOMA_k = W[i] * math.log(1 + jobList[i, k, 0] * P[i] / (jobList[i, j, 0] * P[i] + N[i]), 2)
+                # time_NOMA_k = jobList[i, k, 1] / R_NOMA_k
+                # R_OMA_j = W[i] * math.log(1 + jobList[i, j, 0] * P[i] / N[i], 2)
+                # time_OMA_j = jobList[i, j, 1] / R_OMA_j
+                # T_kj = max(time_NOMA_k, time_OMA_j)
+                #
+                # print(min(T_jk, T_kj))
+                # exit()
+
+
+                time_matrix[i, j, k] = min(T_jk, T_kj)
+
+    return time_matrix, time_list
+
+def sample_env(batch_size: list) -> tuple:
+    batch_size = batch_size[0] if isinstance(batch_size, (list, torch.Size)) else batch_size
+    random.seed(int(time.time()))
+    np.random.seed(int(time.time()))
+
+    min_job_range, max_job_range = 5, 5
+    min_machine_range, max_machine_range = 2, 2
+
+    numberOfJobs = torch.tensor([[random.randint(min_job_range, max_job_range)] for _ in range(batch_size)])
+    numberOfMachines = torch.tensor([[random.randint(min_machine_range, max_machine_range)] for _ in range(batch_size)])
+    max_job = max_job_range
+    max_machine = max_machine_range
+    # max_job = torch.max(numberOfJobs).item()
+    # max_machine = torch.max(numberOfMachines).item()
+    # numberOfJobs = torch.tensor([8]).repeat(batch_size, 1)
+    # numberOfMachines = torch.tensor([2]).repeat(batch_size, 1)
+    print("sample_env: numberOfJobs:", numberOfJobs.flatten().shape,
+          "numberOfMachines:", numberOfMachines.flatten().shape)
+    print("max_job:", max_job, "max_machine:", max_machine)
+
+    def h_distribution():
+        d = math.sqrt(random.uniform(0.01, 0.5))
+        tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
+        tmp1 = 10 ** tmp0
+        _h = 1 / tmp1
+
+        # rand_complex = np.random.randn() + 1j * np.random.randn()
+        # _h *= np.abs(rand_complex / np.sqrt(2)) ** 2
+        return _h, d
+
+    # def h_distribution():
+    #     d = 0.3
+    #     tmp0 = (128.1 + 37.6 * math.log(d, 10)) / 10
+    #     tmp1 = 10 ** tmp0
+    #     _h = 1 / tmp1
+    #     return _h, d
+
+    # h与d负相关
+    h_and_d = torch.zeros((batch_size, max_job, 2))
+    for i in range(batch_size):
+        h_and_d[i, :numberOfJobs[i].item(), :] = torch.tensor([sorted([h_distribution() for _ in range(numberOfJobs[i].item())], reverse=True, key=lambda x: x[0])])
+    h, norm_h = h_and_d[:, :, 0], - h_and_d[:, :, 1]
+    # norm_h = (norm_h - 0.3) / 0.1155
+    # h = h_and_d[:, :, 0]
+    # norm_h = (h.clone() - 7.9659e-11) / 1.5511e-10
+
+    L = torch.zeros((batch_size, max_job))
+    for i in range(batch_size):
+        L[i, :numberOfJobs[i].item()] = torch.tensor([random.randint(1, 1024) for _ in range(numberOfJobs[i].item())])
+        # L[i, :numberOfJobs[i].item()] = torch.tensor([512 for _ in range(numberOfJobs[i].item())])
+    # norm_L = (L.clone() - 512.5) / 295.6032
+    norm_L = L.clone() / 200
+
+
+    W = torch.tensor([[180 / numberOfMachines[i].item() * 1000] for i in range(batch_size)])
+    norm_W = W.clone() / 20000
+
+    P = torch.tensor([[0.1] for _ in range(batch_size)])
+    norm_P = P.clone()
+
+    N = torch.tensor([[(10 ** (-174 / 10)) / 1000 * (180 / numberOfMachines[i].item() * 1000)] for i in range(batch_size)])
+    norm_N = norm_W.clone() / 5
     
-# wandb.login(key="3ae57cc2187485d92b071bc2515f64c63891e44e")
-# logger = WandbLogger(project="NOMA", name="p346 参数参考matlab代码2 没有log(reward)", config={"网络更改": "Net_loop=1 GNN_loop=2, vf_lambda=无用, entropy_lambda=0, ppo_epochs=5, quantile=0.7, emb_dim=128, batch_size=128, lr=1e-6, factor=500, reward_add_eps=无用1e-3, max_grad_norm=1.0, logit_multiplier=10, normalize_adv=False",})
-logger = None
-# logger = WandbLogger(project="NOMA", name="p348 sl转rl过程测试", config={})
+    return h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines, max_job, max_machine
 
-env = NOMAenv()
-emb_dim = 256
-# policy = AttentionModelPolicy(env_name=env.name, # this is actually not needed since we are initializing the embeddings!
-#                               embed_dim=emb_dim,
-#                               init_embedding=NOMAInitEmbedding(emb_dim),
-#                               context_embedding=NOMAContext(emb_dim),
-#                               dynamic_embedding=NOMADynamicEmbedding(emb_dim),
-#                               check_nan=True,)
 
-policy = GNNPolicy(NOMANet=NOMANet(embed_dim=emb_dim, logit_multiplier=10))
+def action_to_tensor(Action: torch.Tensor, td: TensorDict) -> torch.Tensor:
+    device = Action.device
+    max_job = td["max_job"][0].item()
+    max_machine = td["max_machine"][0].item()
+    valid_indices = Action != -1
+    actionTensor = torch.zeros((Action.size(0), max_job*(max_job+max_machine)), device=device)
+    actionTensor[torch.arange(Action.size(0), device=device)[valid_indices], Action[valid_indices]] = 1
+    return actionTensor.reshape((Action.size(0), max_job, max_job+max_machine))
 
-# model = myPPO(env,
-#             policy=policy,
-#
-#             mini_batch_size=1.0,
-#             batch_size=128,
-#             val_batch_size=32,
-#             test_batch_size=32,
-#
-#             train_data_size=256,
-#             val_data_size=32,
-#             test_data_size=32,
-#
-#             normalize_adv=False,
-#             ppo_epochs=5,
-#             clip_range=0.2,
-#             entropy_lambda=0.0,
-#             vf_lambda=0.3,
-#             quantile=0.7,
-#             critic=MyCriticNetwork(embed_dim=emb_dim),
-#             critic_kwargs={"embed_dim": emb_dim},
-#             optimizer_kwargs={"lr": 1e-6},
-#             max_grad_norm=0.5,
-#             print_grads=True)
 
-# model = myPPO(env,
-#             policy=policy,
-#
-#             mini_batch_size=1.0,
-#             batch_size=32,
-#             val_batch_size=32,
-#             test_batch_size=32,
-#
-#             train_data_size=256,
-#             val_data_size=32,
-#             test_data_size=32,
-#
-#             normalize_adv=False,
-#             ppo_epochs=5,
-#             clip_range=0.2,
-#             entropy_lambda=0.0,
-#             vf_lambda=0.3,
-#             quantile=0.7,
-#             critic=MyCriticNetwork(embed_dim=emb_dim),
-#             critic_kwargs={"embed_dim": emb_dim},
-#             optimizer_kwargs={"lr": 1e-6},
-#             max_grad_norm=0.5,
-#             print_grads=True)
+class NOMAGenerator(Generator):
+    def __init__(self):
+        super().__init__()
+        # print("###Generator###")
 
-# my_policy = LPTPolicy(Net=NOMA_LPT_NET())
-model = mySupervisedLearning(env,
-            policy=policy,
+    def _generate(self, batch_size, **kwargs) -> TensorDict:
+        # print("generate")
+        h, L, W, P, N, norm_h, norm_L, norm_W, norm_P, norm_N, numberOfJobs, numberOfMachines, max_job, max_machine = sample_env(batch_size=batch_size)
+        bs = batch_size[0] if isinstance(batch_size, (list, torch.Size)) else batch_size
+        Graph = torch.zeros((bs, max_job, max_job+max_machine))
+        jobList = torch.stack((h, L), dim=-1)
+        T, T_list = build_time_matrix(jobList, numberOfJobs, W, P, N)
 
-            mini_batch_size=1.0,
-            batch_size=32,
-            val_batch_size=32,
-            test_batch_size=32,
+        return_td = TensorDict(
+            {
+                "Graph": Graph,
+                "h": h,
+                "L": L,
+                "W": W,
+                "P": P,
+                "N": N,
+                "jobList": jobList,
+                "T": T,
+                "T_list": T_list,
+                "norm_h": norm_h,
+                "norm_L": norm_L,
+                "norm_W": norm_W,
+                "norm_P": norm_P,
+                "norm_N": norm_N,
+                "numberOfJobs": numberOfJobs,
+                "numberOfMachines": numberOfMachines,
+                "max_job": torch.tensor([max_job]).repeat(bs, 1),
+                "max_machine": torch.tensor([max_machine]).repeat(bs, 1),
+            },
+            batch_size=batch_size,
+        )
 
-            train_data_size=256,
-            val_data_size=32,
-            test_data_size=32,
+        return return_td
 
-            normalize_adv=False,
-            ppo_epochs=5,
-            clip_range=0.2,
-            entropy_lambda=0.0,
-            vf_lambda=0.3,
-            quantile=0.7,
-            critic=MyCriticNetwork(embed_dim=emb_dim),
-            critic_kwargs={"embed_dim": emb_dim},
-            optimizer_kwargs={"lr": 1e-6},
-            max_grad_norm=0.5,
-            print_grads=True)
+    def generate(self, batch_size, **kwargs):
+        return self._generate(batch_size, **kwargs)
 
-# Greedy rollouts over untrained model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-policy = model.policy.to(device)
-# print(policy)
+    def generate_for_LPT(self, batch_size, env, phase):
+        td = env.reset(batch_size=batch_size)
 
-# checkpoint_callback = [ModelCheckpoint(dirpath="./checkpoints/rl",
-#                                        filename=None,  # save as {epoch}-{step}.ckpt
-#                                        save_top_k=0,
-#                                        save_last=True,  # save the last model
-#                                        monitor="val/reward",  # monitor validation reward
-#                                        mode="max")]  # maximize validation reward
-checkpoint_callback = None
+        td = LPT_td(td)
 
-trainer = RL4COTrainer(max_epochs=50, devices=1, logger=logger, log_every_n_steps=1, callbacks=checkpoint_callback)
-trainer.fit(model)
+        td.set("reward", env.get_reward(td, td["actions"]))
 
-# td_init = env.reset(batch_size=BATCH_SIZE)
-# out = policy(td_init.clone(), env, phase="test", return_actions=True, return_init_embeds=False)
-# print(out)
-# actions = out['actions']
-# print(actions)
-# print(f"""after policy: {env.step_to_end_from_actions(td_init.clone(), actions)["Graph"]}""")
-# print(f"""best reward: {print_best_solution(td_init.clone())}""")
+        return td
+    
+    
+"""
+  _   _  ____  __  __                         
+ | \ | |/ __ \|  \/  |   /\                   
+ |  \| | |  | | \  / |  /  \   ___ _ ____   __
+ | . ` | |  | | |\/| | / /\ \ / _ \ '_ \ \ / /
+ | |\  | |__| | |  | |/ ____ \  __/ | | \ V / 
+ |_| \_|\____/|_|  |_/_/    \_\___|_| |_|\_/  
+"""
+
+
+class NOMAenv(RL4COEnvBase):
+    """NOMA environment"""
+
+    name = "NOMA"
+
+    def __init__(
+        self,
+        generator: NOMAGenerator = None,
+        generator_params: dict = {},
+        check_solution=False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if generator is None:
+            generator = NOMAGenerator(**generator_params)
+        self.generator = generator
+        self.check_solution = check_solution
+        self._make_spec(self.generator)
+
+        self.random_mean = 0
+        self.random_std = 1
+
+    def _step(self, td: TensorDict) -> TensorDict:
+        # print("__________###Step###__________")
+        origin_action = td["action"]
+        tensor_action = action_to_tensor(origin_action, td)
+        Graph = td["Graph"]
+        Graph += tensor_action
+        available = self.NOMA_mask(Graph, td["golden_mask"])
+
+        done = torch.sum(available.reshape(td.batch_size[0], -1), dim=(-1)) == 0
+        td.update(
+            {
+                "Graph": Graph,
+                "action_mask": available.reshape(td.batch_size[0], -1),
+                "done": done,
+            },
+        )
+
+        # The reward is calculated outside via get_reward for efficiency, so we set it to 0 here
+        # reward = torch.zeros_like(done) * done
+        reward = (-self.calculate_time_dummy(td)+self.random_mean)/self.random_std
+        td.update(
+            {
+                "reward": reward,
+            },
+        )
+        return td
+
+    def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
+        print("###Reset###")
+        # print("我在reset")
+
+        init_Graph = td["Graph"] if td is not None else None
+        device = init_Graph.device if init_Graph is not None else self.device
+        self.to(device)
+        batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+
+        td = self.generator.generate(batch_size=batch_size)
+
+        action_mask = torch.zeros_like(init_Graph)
+        for i in range(batch_size[0]):
+            _numberOfJobs = td["numberOfJobs"][i].item()
+            _numberOfMachines = td["numberOfMachines"][i].item()
+            max_job = td["max_job"][i].item()
+
+            left_part = torch.ones((_numberOfJobs, _numberOfJobs), device=device).triu(diagonal=1)
+            right_part = torch.ones((_numberOfJobs, _numberOfMachines), device=device)
+
+            action_mask[i, :_numberOfJobs, :_numberOfJobs] = left_part
+            action_mask[i, :_numberOfJobs, max_job:max_job + _numberOfMachines] = right_part
+
+            if _numberOfJobs < max_job:
+                action_mask[i, _numberOfJobs:, -1] = 1
+
+        td.update({
+                "action_mask": action_mask.reshape(batch_size[0], -1).bool(),
+                "golden_mask": action_mask.reshape(batch_size[0], -1).bool(),
+            },)
+
+        # print(td)
+        # print("________________")
+
+        return td
+
+    def NOMA_mask(self, Graph: torch.Tensor, golden_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Return the mask of the graph
+        输入的Graph是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+        torch.Tensor: 最初始的mask
+        输出的mask是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+        """
+        numberOfJobs = Graph.shape[-2]
+        numberOfMachines = Graph.shape[-1] - numberOfJobs
+        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+        batch_size = Graph.shape[0]
+        graph_shape = Graph.shape[1:]
+
+        left = torch.ones((batch_size, graph_shape[0], graph_shape[0])).to(Graph.device)
+        right = torch.ones((batch_size, graph_shape[0], graph_shape[1] - graph_shape[0])).to(Graph.device)
+
+        row = torch.sum(Graph, dim=2, keepdim=True)
+        col = torch.sum(Graph, dim=1, keepdim=True)
+
+        left = (left - row - torch.transpose(row, 1, 2) - col[:, :, 0:graph_shape[0]] -
+                torch.transpose(col[:, :, 0:graph_shape[0]], 1, 2))
+        left = torch.where(left == 1, torch.tensor(1), torch.tensor(0))
+        left = left.triu(diagonal=1)
+        right -= row
+        ret = (torch.cat((left, right), dim=2) * golden_mask.reshape_as(Graph)).bool()
+        return ret
+
+
+    def _make_spec(self, generator: NOMAGenerator):
+        self.observation_spec = CompositeSpec(
+            Graph=UnboundedContinuousTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            h=UnboundedContinuousTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            L=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            W=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            P=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            N=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_h=UnboundedContinuousTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_L=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_W=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_P=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_N=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            shape=(),
+        )
+        self.action_spec = BoundedTensorSpec(
+            low=0,
+            high=1,
+            shape=(1,),
+            dtype=torch.int64,
+        )
+        self.reward_spec = UnboundedContinuousTensorSpec(shape=(1))
+        self.done_spec = UnboundedDiscreteTensorSpec(shape=(1), dtype=torch.bool)
+
+    def _get_reward(self, td: TensorDict, actions: torch.Tensor) -> torch.Tensor:
+        # print("###get_reward###")
+        # 在一段trajectory结束后，才会调用
+        # print("reward", -self.calculate_time_dummy(td))
+
+        # return -torch.log(self.calculate_time_dummy(td))
+        return -torch.log(reward_multiplicative_factor * (self.calculate_time_dummy(td) + 1e-3))
+        # return -(reward_multiplicative_factor * (self.calculate_time_dummy(td)))
+
+    def get_action_mask(self, td: TensorDict) -> TensorDict:
+        Graph = td["Graph"]
+        action_mask = self.NOMA_mask(Graph, td["golden_mask"]).reshape(td.batch_size[0], -1)
+        td.update(
+            {
+                "action_mask": action_mask.reshape(td.batch_size[0], -1),
+            },
+        )
+        return td
+
+    def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
+        Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
+        bs, numberOfJobs = T_list.shape[0], T_list.shape[-1]
+        Graph = Graph.reshape(bs, numberOfJobs, -1)
+        numberOfMachines = Graph.shape[-1] - numberOfJobs
+        T = T.reshape(-1, numberOfJobs, numberOfJobs)
+        T_list = T_list.reshape(-1, 1, numberOfJobs)
+
+        G_tmp = Graph[:, :, 0:numberOfJobs]
+        row = torch.sum(G_tmp, dim=-1)
+        col = torch.sum(G_tmp, dim=-2)
+
+        totalTime_OMA_fake = (1 - row - col).unsqueeze(dim=-2) * T_list
+        totalTime_NOMA_fake = torch.sum(G_tmp * T, dim=-2).unsqueeze(dim=-2)
+        totalTime_fake = totalTime_OMA_fake + totalTime_NOMA_fake
+
+        ret, _ = torch.max(totalTime_fake @ (Graph[:, :, numberOfJobs: (numberOfJobs + numberOfMachines)]), dim=-1)
+
+        return ret.flatten()
+
+    def calculate_time_dummy(self, td: TensorDict) -> torch.Tensor:
+        Graph, T_list = td["Graph"], td["T_list"]
+        bs, numberOfJobs = T_list.shape[0], T_list.shape[-1]
+        Graph = Graph.reshape(bs, numberOfJobs, -1)
+        T_list = T_list.reshape(-1, 1, numberOfJobs)
+
+        row = torch.sum(Graph, dim=-1).reshape_as(T_list)
+        totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
+
+        ret, _ = torch.max(torch.stack((totalTime_dummy, self.calculate_time_nodummy(td))), dim=0)
+
+        # 注意此结果为正的时间
+        return ret
+
+    def step_to_end_from_actions(self, td: TensorDict, actions: torch.Tensor) -> TensorDict:
+        zero_Graph = torch.zeros_like(td["Graph"])
+        actions = actions.t()
+        td.update({"Graph": zero_Graph})
+
+        for i in range(actions.shape[0]):
+            td.update({"action": actions[i]})
+            td = self._step(td)
+
+        return td
+
+    
+    def convert_to_true_reward(self, nor_reward):
+        # return torch.exp(-nor_reward)
+        return (torch.exp(-nor_reward)) / reward_multiplicative_factor - 1e-3
+
+    def dataset(self, batch_size=[], phase="train", filename=None):
+        """Return a dataset of observations
+        Generates the dataset if it does not exist, otherwise loads it from file
+        """
+
+        ### only For LPT training
+
+        generator = NOMAGenerator()
+
+        if filename is not None:
+            log.info(f"Overriding dataset filename from {filename}")
+        f = getattr(self, f"{phase}_file") if filename is None else filename
+        if f is None:
+            if phase != "train":
+                log.warning(f"{phase}_file not set. Generating dataset instead")
+            td = generator.generate_for_LPT(batch_size, NOMAenv(), phase)
+        else:
+            log.info(f"Loading {phase} dataset from {f}")
+            if phase == "train":
+                log.warning(
+                    "Loading training dataset from file. This may not be desired in RL since "
+                    "the dataset is fixed and the agent will not be able to explore new states"
+                )
+            try:
+                if isinstance(f, Iterable) and not isinstance(f, str):
+                    names = getattr(self, f"{phase}_dataloader_names")
+                    return {
+                        name: self.dataset_cls(self.load_data(_f, batch_size))
+                        for name, _f in zip(names, f)
+                    }
+                else:
+                    td = self.load_data(f, batch_size)
+            except FileNotFoundError:
+                log.error(
+                    f"Provided file name {f} not found. Make sure to provide a file in the right path first or "
+                    f"unset {phase}_file to generate data automatically instead"
+                )
+                td = generator.generate_for_LPT(batch_size, NOMAenv(), phase)
+
+        return self.dataset_cls(td)
+
+
+"""
+   ____  __  __                         
+  / __ \|  \/  |   /\                   
+ | |  | | \  / |  /  \   ___ _ ____   __
+ | |  | | |\/| | / /\ \ / _ \ '_ \ \ / /
+ | |__| | |  | |/ ____ \  __/ | | \ V / 
+  \____/|_|  |_/_/    \_\___|_| |_|\_/  
+"""
+
+
+class OMAenv(RL4COEnvBase):
+    """OMA environment"""
+
+    name = "OMA"
+
+    def __init__(
+        self,
+        generator: NOMAGenerator = None,
+        generator_params: dict = {},
+        check_solution=False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if generator is None:
+            generator = NOMAGenerator(**generator_params)
+        self.generator = generator
+        self.check_solution = check_solution
+        self._make_spec(self.generator)
+
+        # self.random_mean = 0.0108
+        # self.random_std = 0.0021
+        self.random_mean = 0
+        self.random_std = 1
+
+    def _step(self, td: TensorDict) -> TensorDict:
+        # print("__________###Step###__________")
+        origin_action = td["action"]
+        tensor_action = action_to_tensor(origin_action, td)
+        Graph = td["Graph"]
+        Graph += tensor_action
+        available = self.OMA_mask(Graph, td["golden_mask"])
+        done = torch.sum(available.reshape(td.batch_size[0], -1), dim=(-1)) == 0
+        td.update(
+            {
+                "Graph": Graph,
+                "action_mask": available.reshape(td.batch_size[0], -1),
+                "done": done,
+            },
+        )
+
+        # The reward is calculated outside via get_reward for efficiency, so we set it to 0 here
+        # reward = torch.zeros_like(done) * done
+        reward = (-self.calculate_time_dummy(td)+self.random_mean)/self.random_std
+        td.update(
+            {
+                "reward": reward,
+            },
+        )
+        return td
+
+    def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
+        print("###Reset###")
+
+        init_Graph = td["Graph"] if td is not None else None
+        device = init_Graph.device if init_Graph is not None else self.device
+        self.to(device)
+        batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+
+        td = self.generator.generate(batch_size=batch_size)
+
+        action_mask = torch.zeros_like(init_Graph)
+        for i in range(batch_size[0]):
+            _numberOfJobs = td["numberOfJobs"][i].item()
+            _numberOfMachines = td["numberOfMachines"][i].item()
+            max_job = td["max_job"][i].item()
+
+            left_part = torch.zeros((_numberOfJobs, _numberOfJobs), device=device)
+            right_part = torch.ones((_numberOfJobs, _numberOfMachines), device=device)
+
+            action_mask[i, :_numberOfJobs, :_numberOfJobs] = left_part
+            action_mask[i, :_numberOfJobs, max_job:max_job + _numberOfMachines] = right_part
+
+            if _numberOfJobs < max_job:
+                action_mask[i, _numberOfJobs:, -1] = 1
+
+        td.update({
+                "action_mask": action_mask.reshape(batch_size[0], -1).bool(),
+                "golden_mask": action_mask.reshape(batch_size[0], -1).bool(),
+            },)
+        
+        return td
+
+    def OMA_mask(self, Graph: torch.Tensor, golden_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Return the mask of the graph
+        输入的Graph是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+        torch.Tensor: 最初始的mask
+        输出的mask是一个batch_size * numberOfJobs * (numberOfJobs + numberOfMachines)的三维张量
+        """
+        numberOfJobs = Graph.shape[-2]
+        numberOfMachines = Graph.shape[-1] - numberOfJobs
+        Graph = Graph.reshape(-1, numberOfJobs, numberOfJobs + numberOfMachines)
+        batch_size = Graph.shape[0]
+        graph_shape = Graph.shape[1:]
+
+        left = torch.zeros((batch_size, graph_shape[0], graph_shape[0])).to(Graph.device)
+        right = torch.ones((batch_size, graph_shape[0], graph_shape[1] - graph_shape[0])).to(Graph.device)
+
+        row = torch.sum(Graph, dim=2, keepdim=True)
+
+        right -= row
+        ret = (torch.cat((left, right), dim=2) * golden_mask.reshape_as(Graph)).bool()
+        return ret
+
+
+    def _make_spec(self, generator: NOMAGenerator):
+        self.observation_spec = CompositeSpec(
+            Graph=UnboundedContinuousTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            h=UnboundedContinuousTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            L=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            W=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            P=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            N=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_h=UnboundedContinuousTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_L=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_W=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_P=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            norm_N=UnboundedDiscreteTensorSpec(
+                shape=(1),
+                dtype=torch.float32,
+            ),
+            shape=(),
+        )
+        self.action_spec = BoundedTensorSpec(
+            low=0,
+            high=1,
+            shape=(1,),
+            dtype=torch.int64,
+        )
+        self.reward_spec = UnboundedContinuousTensorSpec(shape=(1))
+        self.done_spec = UnboundedDiscreteTensorSpec(shape=(1), dtype=torch.bool)
+
+    def _get_reward(self, td: TensorDict, actions: torch.Tensor) -> torch.Tensor:
+        # print("###get_reward###")
+        # 在一段trajectory结束后，才会调用
+        # print("reward", -self.calculate_time_dummy(td))
+
+        return -torch.log(reward_multiplicative_factor * (self.calculate_time_dummy(td) + 1e-3))
+
+    def get_action_mask(self, td: TensorDict) -> TensorDict:
+        Graph = td["Graph"]
+        action_mask = self.OMA_mask(Graph, td["golden_mask"]).reshape(td.batch_size[0], -1)
+        td.update(
+            {
+                "action_mask": action_mask.reshape(td.batch_size[0], -1),
+            },
+        )
+        return td
+
+    def calculate_time_nodummy(self, td: TensorDict) -> torch.Tensor:
+        Graph, T, T_list = td["Graph"], td["T"], td["T_list"]
+        bs, numberOfJobs = T_list.shape[0], T_list.shape[-1]
+        Graph = Graph.reshape(bs, numberOfJobs, -1)
+        numberOfMachines = Graph.shape[-1] - numberOfJobs
+        T = T.reshape(-1, numberOfJobs, numberOfJobs)
+        T_list = T_list.reshape(-1, 1, numberOfJobs)
+
+        G_tmp = Graph[:, :, 0:numberOfJobs]
+        row = torch.sum(G_tmp, dim=-1)
+        col = torch.sum(G_tmp, dim=-2)
+
+        totalTime_OMA_fake = (1 - row - col).unsqueeze(dim=-2) * T_list
+        totalTime_NOMA_fake = torch.sum(G_tmp * T, dim=-2).unsqueeze(dim=-2)
+        totalTime_fake = totalTime_OMA_fake + totalTime_NOMA_fake
+
+        ret, _ = torch.max(totalTime_fake @ (Graph[:, :, numberOfJobs: (numberOfJobs + numberOfMachines)]), dim=-1)
+
+        return ret.flatten()
+
+    def calculate_time_dummy(self, td: TensorDict) -> torch.Tensor:
+        Graph, T_list = td["Graph"], td["T_list"]
+        bs, numberOfJobs = T_list.shape[0], T_list.shape[-1]
+        Graph = Graph.reshape(bs, numberOfJobs, -1)
+        T_list = T_list.reshape(-1, 1, numberOfJobs)
+
+        row = torch.sum(Graph, dim=-1).reshape_as(T_list)
+        totalTime_dummy = torch.sum((1 - row) * T_list, dim=-1).flatten()
+
+        ret, _ = torch.max(torch.stack((totalTime_dummy, self.calculate_time_nodummy(td))), dim=0)
+
+        # 注意此结果为正的时间
+        return ret
+
+    def step_to_end_from_actions(self, td: TensorDict, actions: torch.Tensor) -> TensorDict:
+        zero_Graph = torch.zeros_like(td["Graph"])
+        actions = actions.t()
+        td.update({"Graph": zero_Graph})
+
+        for i in range(actions.shape[0]):
+            td.update({"action": actions[i]})
+            td = self._step(td)
+
+        return td
+
+    def convert_to_true_reward(self, nor_reward):
+        return (torch.exp(-nor_reward)) / reward_multiplicative_factor - 1e-3
+
+
+
+if __name__ == "__main__":
+    env = NOMAenv()
+    # td_to_save = env.reset(batch_size=[128])
+    # save_tensordict_to_npz(td_to_save, "./tensordict/test/td_test.npz", compress=False)
+    # tmp = load_npz_to_tensordict("./tensordict/tmp/td_20.npz")
+    # print(tmp["max_job"].shape)
+
+    # def my_random_policy(td):
+    #     """Helper function to select a random action from available actions or None if no action is available"""
+    #     action_mask = td["action_mask"].float()
+    #     actions = []
+    #     for mask in action_mask:
+    #         if mask.sum() == 0:
+    #             actions.append(-1)
+    #         else:
+    #             action = torch.multinomial(mask, 1).squeeze(-1)
+    #             print(action)
+    #             actions.append(action.item())
+    #     td.set("action", torch.tensor(actions))
+    #     return td
+    #
+    # reward, td, actions = rollout(env, env.reset(batch_size=[BATCH_SIZE]), my_random_policy)
+    # print(reward)
+    # print(td["h"], td["L"], td["W"])
+    # print("actions: ", actions)
+    # print(env.step_to_end_from_actions(td.clone(), actions)["reward"])
+    # print(td)
+    # print(td["action"])
+
+    # h = torch.mean(td["h"])
+    # L = torch.mean(td["L"])
+    # W = torch.mean(td["W"])
+    # P = torch.mean(td["P"])
+    # N = torch.mean(td["N"])
+    #
+    # print("mean h: ", h.item(), "mean L: ", L.item(), "mean W: ", W.item(), "mean P: ", P.item(), "mean N: ", N.item())
+
+
+
+
+
+    # Generator = NOMAGenerator()
+    #
+    # td = Generator.generate_for_LPT(batch_size=[128], env=env, phase=None)
+    #
+    # save_tensordict_to_npz(td, "./tensordict/train/td_test.npz", compress=False)
+    #
+    # aaa = load_npz_to_tensordict("./tensordict/train/td_test.npz")
+    # print(aaa)
 
