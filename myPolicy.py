@@ -42,12 +42,11 @@ class myEncoder(nn.Module):
         print("###NOMAInitEmbedding###")
         super(myEncoder, self).__init__()
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=10, nhead=2, dim_feedforward=4*embed_dim,
+        encoder_layer = nn.TransformerEncoderLayer(d_model=10, nhead=5, dim_feedforward=4*embed_dim,
                                                    batch_first=True, layer_norm_eps=1e-5, dropout=0)
-        transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
+        transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=1)
         self.encoder = nn.Sequential(transformer_encoder,
                                      nn.Linear(10, embed_dim, linear_bias),
-                                     nn.LayerNorm(embed_dim, eps=1e-5),
                                      nn.LeakyReLU())
 
         self.linear = nn.Sequential(nn.Linear(embed_dim, embed_dim, linear_bias),
@@ -97,7 +96,7 @@ class myEncoder(nn.Module):
 
         encoder_output = self.encoder(feats_tensor)
 
-        return self.linear(encoder_output)
+        return encoder_output
 
 
 class GraphNN(nn.Module):
@@ -105,20 +104,24 @@ class GraphNN(nn.Module):
         super(GraphNN, self).__init__()
         print("my GNN")
 
-        num_heads = 5
+        num_heads = 8
 
         self.conv0 = EdgeGATConv(in_feats=embed_dim, edge_feats=1, out_feats=embed_dim,
                                  num_heads=num_heads, allow_zero_in_degree=True)
         self.conv1 = EdgeGATConv(in_feats=embed_dim, edge_feats=1, out_feats=embed_dim,
                                  num_heads=num_heads, allow_zero_in_degree=True)
-        self.conv2 = EdgeGATConv(in_feats=embed_dim, edge_feats=1, out_feats=embed_dim,
-                                 num_heads=num_heads, allow_zero_in_degree=True)
+        # self.conv2 = EdgeGATConv(in_feats=embed_dim, edge_feats=1, out_feats=embed_dim,
+        #                          num_heads=num_heads, allow_zero_in_degree=True)
+
+        self.layerNorm0 = nn.LayerNorm([num_heads, embed_dim])
+        self.layerNorm1 = nn.LayerNorm([num_heads, embed_dim])
+        # self.layerNorm2 = nn.LayerNorm([num_heads, embed_dim])
 
         self.linear = nn.Linear(num_heads * embed_dim, embed_dim)
 
         decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=8, dim_feedforward=4*embed_dim,
                                                    batch_first=True, layer_norm_eps=1e-5, dropout=0)
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=3)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=1)
 
     def forward(self, td: TensorDict, encoder_output: Tensor) -> Tensor:
         # td: TensorDict
@@ -149,16 +152,21 @@ class GraphNN(nn.Module):
         edgeFeatures = T_matrix[batch_idx, row_idx, col_idx].reshape(-1, 1)
 
         zro_time_node_feats = self.conv0(dgl_Graph, nodeFeatures, edgeFeatures)
-        zro_time_node_feats = F.leaky_relu(zro_time_node_feats)
+        zro_time_node_feats = self.layerNorm0(zro_time_node_feats)
+        # zro_time_node_feats = F.leaky_relu(zro_time_node_feats)
 
         fst_time_node_feats = self.conv1(dgl_Graph, zro_time_node_feats.mean(dim=1), edgeFeatures)
-        fst_time_node_feats = F.leaky_relu(fst_time_node_feats)
+        fst_time_node_feats = self.layerNorm1(fst_time_node_feats)
+        # fst_time_node_feats = F.leaky_relu(fst_time_node_feats)
 
-        snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edgeFeatures)
-        snd_time_node_feats = F.leaky_relu(snd_time_node_feats)
+        # snd_time_node_feats = self.conv2(dgl_Graph, fst_time_node_feats.mean(dim=1), edgeFeatures)
+        # snd_time_node_feats = self.layerNorm2(snd_time_node_feats)
+        # snd_time_node_feats = F.leaky_relu(snd_time_node_feats)
+        
         # shape = [batch_size*(max_job+max_machine), num_heads, embed_dim]
 
-        output = self.linear(snd_time_node_feats.reshape(bs*(max_job+max_machine), -1))
+        output = torch.mean(fst_time_node_feats, dim=1)
+        # output = torch.mean(snd_time_node_feats, dim=1)
         output = output.reshape(bs, max_job+max_machine, embed_dim)
 
         output = self.transformer_decoder(tgt=output, memory=encoder_output)
@@ -197,18 +205,20 @@ class MyCriticNetwork(CriticNetwork):
 
 
 class NOMANet(nn.Module):
-    def __init__(self, embed_dim):
+    def __init__(self, embed_dim, logit_multiplier=10):
         super(NOMANet, self).__init__()
         print("my Policy")
 
         self.encoder = myEncoder(embed_dim)
 
         self.GNN0 = GraphNN(embed_dim)
-        self.GNN1 = GraphNN(embed_dim)
-        self.GNN2 = GraphNN(embed_dim)
+        # self.GNN1 = GraphNN(embed_dim)
+        # self.GNN2 = GraphNN(embed_dim)
 
         self.linear = nn.Linear(embed_dim, embed_dim)
         self.softmax = nn.Softmax(dim=-1)
+
+        self.multiplier = logit_multiplier
 
     def forward(self, td: TensorDict) -> Tuple[Tensor, Tensor]:
         device = td["Graph"].device
@@ -217,14 +227,15 @@ class NOMANet(nn.Module):
         encoder_output = self.encoder(td)
 
         decoder_output = self.GNN0(td, encoder_output)
-        decoder_output = self.GNN1(td, decoder_output)
-        decoder_output = self.GNN2(td, decoder_output)
+        # decoder_output = self.GNN1(td, decoder_output)
+        # decoder_output = self.GNN2(td, decoder_output)
 
         input1 = self.linear(decoder_output)
         input2 = decoder_output[:, :max_job]
-        score = torch.einsum("bmd,bnd->bmn", input1, input2).reshape(bs, -1)
+        score = torch.einsum("bmd,bnd->bnm", input1, input2).reshape(bs, -1)
 
         logits = torch.log(self.softmax(score))
+        logits = self.multiplier * torch.tanh(logits / self.multiplier)
 
         return logits, td["action_mask"]
 
@@ -326,6 +337,7 @@ class GNNPolicy(nn.Module):
             )
             # 此时td内的action被更新过了
             td = env.step(td)["next"]
+            # print(td["done"])
             step += 1
             if step > max_steps:
                 log.error(
@@ -361,3 +373,4 @@ class GNNPolicy(nn.Module):
         #     outdict["init_embeds"] = init_embeds
 
         return outdict
+
